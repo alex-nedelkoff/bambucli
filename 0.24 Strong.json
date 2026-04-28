@@ -1,0 +1,19 @@
+{
+    "from": "User",
+    "inherits": "0.24mm Draft @BBL X1C",
+    "name": "0.24 Strong",
+    "print_extruder_id": [
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "print_settings_id": "0.24 Strong",
+    "skeleton_infill_density": "100%",
+    "skin_infill_density": "100%",
+    "sparse_infill_density": "100%",
+    "sparse_infill_pattern": "zig-zag",
+    "support_critical_regions_only": "1",
+    "version": "2.1.0.19",
+    "wall_loops": "4"
+}

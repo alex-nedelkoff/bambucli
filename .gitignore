@@ -1,0 +1,37 @@
+# Patron data — MUST NOT be committed.
+# Contains library card numbers, email bodies, full names. MFIPPA-protected.
+printqueue/
+
+# Runtime cache (merged profile JSONs regenerated on each slice)
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+._*
+
+# Logs (in case anything writes to repo root)
+*.log
+*.err
+
+# Backups / temp
+*.bak
+*.tmp
+
+# Early-exploration checkout of a third-party Bambu API library; not part of
+# the slicer/web pipeline. Has its own .git which git would treat as a
+# submodule otherwise.
+BambuAPI/

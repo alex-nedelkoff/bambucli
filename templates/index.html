@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+{% block content %}
+<form method="POST" action="/submit" enctype="multipart/form-data" class="card" id="intake-form">
+  <h2>New Print Order</h2>
+
+  <div class="field">
+    <label>Intake type</label>
+    <div class="radio-row">
+      <label>
+        <input type="radio" name="intake" value="slice" checked>
+        <span>Upload STL(s) — we slice</span>
+      </label>
+      <label>
+        <input type="radio" name="intake" value="import">
+        <span>Upload pre-sliced 3MF(s)</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="field slice-only">
+    <label for="printer">Target printer</label>
+    <select id="printer" name="printer">
+      <option value="x1c" selected>Bambu Lab X1 Carbon</option>
+      <option value="p1s">Bambu Lab P1S</option>
+    </select>
+    <small>Picks the right machine profile + start gcode + printer-model-id baked into the 3MF.</small>
+  </div>
+
+  <div class="field">
+    <label for="customer">Patron name</label>
+    <input id="customer" name="customer" required autocomplete="off">
+  </div>
+
+  <div class="field">
+    <label for="card">Library card (14 digits)</label>
+    <input id="card" name="card" pattern="[0-9 ]{14,}" required autocomplete="off"
+           placeholder="29342503188115 or 293425 0318 8115">
+  </div>
+
+  <div class="field">
+    <label>Files</label>
+    <button type="button" class="button secondary" id="add-files-btn">+ Add file</button>
+    <input type="file" id="file-picker" accept=".stl" multiple style="display:none;">
+
+    <input type="file"   name="files"            id="files"            style="display:none;" multiple>
+    <input type="hidden" name="quantity"         id="quantity-hidden"  value="">
+    <input type="hidden" name="colors"           id="colors-hidden"    value="">
+    <input type="hidden" name="scale"            id="scale-hidden"     value="1.0">
+    <input type="hidden" name="import_metadata"  id="import-metadata"  value="">
+
+    <table class="uploads" id="uploads-table" style="display:none;">
+      <thead id="uploads-thead"></thead>
+      <tbody id="uploads-tbody"></tbody>
+    </table>
+    <p class="empty-msg" id="empty-msg">No files added yet.</p>
+
+    <small class="slice-only">
+      <strong>Colour</strong> and <strong>scale</strong> are per-file.
+      Mixing scales (e.g. one row at <code>1.0</code>, two at <code>1.25</code>)
+      runs separate slice passes and merges them into one multi-plate 3MF.
+    </small>
+    <small class="import-only" style="display:none;">
+      Per-plate colours auto-detected from each 3MF; tweak if the detected name
+      is off. Multiple 3MFs are kept as separate orders for the same patron — you'll
+      get one receipt and one ledger row per file.
+    </small>
+  </div>
+
+  <button type="submit" class="primary">Process order</button>
+</form>
+
+<script>
+(function() {
+  // Slice-mode: per-STL rows
+  let entries = [];                // [{file, qty, color, scale}]
+  // Import-mode: per-FILE groups, each with N plate rows
+  let importFiles = [];            // [{file, plates:[{plate,color,filaments,...}], inspecting:bool}]
+
+  const picker     = document.getElementById('file-picker');
+  const filesIn    = document.getElementById('files');
+  const qtyIn      = document.getElementById('quantity-hidden');
+  const colorsIn   = document.getElementById('colors-hidden');
+  const scaleIn    = document.getElementById('scale-hidden');
+  const metaIn     = document.getElementById('import-metadata');
+  const addBtn     = document.getElementById('add-files-btn');
+  const tbody      = document.getElementById('uploads-tbody');
+  const thead      = document.getElementById('uploads-thead');
+  const emptyMsg   = document.getElementById('empty-msg');
+  const table      = document.getElementById('uploads-table');
+  const form       = document.getElementById('intake-form');
+  const radios     = document.querySelectorAll('input[name="intake"]');
+
+  function isSlice() {
+    return document.querySelector('input[name="intake"]:checked').value === 'slice';
+  }
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n/1024).toFixed(1) + ' KB';
+    return (n/1024/1024).toFixed(1) + ' MB';
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
+  }
+
+  function makeInput(type, value, onInput, props) {
+    const el = document.createElement('input');
+    el.type = type; el.value = value;
+    Object.assign(el, props || {});
+    el.addEventListener('input', onInput);
+    return el;
+  }
+
+  function makeDelBtn(onClick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'remove-btn';
+    b.title = 'Remove';
+    b.textContent = '✕';
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function setHeader(cols) {
+    thead.innerHTML = '<tr>' + cols.map(c => `<th class="${c.cls || ''}">${c.label}</th>`).join('') + '</tr>';
+  }
+
+  function render() {
+    tbody.innerHTML = '';
+
+    if (isSlice()) {
+      setHeader([
+        {label: 'File'},
+        {label: 'Qty',    cls: 'qty-col'},
+        {label: 'Colour', cls: 'color-col'},
+        {label: 'Scale',  cls: 'scale-col'},
+        {label: '',       cls: 'remove-col'},
+      ]);
+      entries.forEach((e, idx) => {
+        const tr = document.createElement('tr');
+        const td0 = document.createElement('td');
+        td0.innerHTML = `${escapeHtml(e.file.name)} <small>(${fmtBytes(e.file.size)})</small>`;
+        tr.appendChild(td0);
+        const td1 = document.createElement('td'); td1.className = 'qty-col';
+        td1.appendChild(makeInput('number', e.qty, ev => {
+          const v = parseInt(ev.target.value, 10);
+          e.qty = (Number.isFinite(v) && v > 0) ? v : 1;
+        }, {min: '1'}));
+        tr.appendChild(td1);
+        const td2 = document.createElement('td'); td2.className = 'color-col';
+        td2.appendChild(makeInput('text', e.color, ev => { e.color = ev.target.value; },
+          {placeholder: 'Black', autocomplete: 'off'}));
+        tr.appendChild(td2);
+        const td3 = document.createElement('td'); td3.className = 'scale-col';
+        td3.appendChild(makeInput('number', e.scale, ev => {
+          const v = parseFloat(ev.target.value);
+          e.scale = (Number.isFinite(v) && v > 0) ? v : 1.0;
+        }, {step: '0.01', min: '0.1', max: '5'}));
+        tr.appendChild(td3);
+        const td4 = document.createElement('td'); td4.className = 'remove-col';
+        td4.appendChild(makeDelBtn(() => { entries.splice(idx, 1); render(); }));
+        tr.appendChild(td4);
+        tbody.appendChild(tr);
+      });
+      table.style.display = entries.length ? '' : 'none';
+      emptyMsg.style.display = entries.length ? 'none' : '';
+      return;
+    }
+
+    // Import mode: file groups, each with header + plate rows
+    setHeader([
+      {label: 'Plate',  cls: 'qty-col'},
+      {label: 'Colour', cls: 'color-col'},
+      {label: 'Time',   cls: 'scale-col'},
+      {label: 'Mass',   cls: 'scale-col'},
+      {label: 'Objects'},
+      {label: '',       cls: 'remove-col'},
+    ]);
+
+    importFiles.forEach((fe, fileIdx) => {
+      const headerTr = document.createElement('tr');
+      headerTr.className = 'file-group-header';
+      const headerTd = document.createElement('td');
+      headerTd.colSpan = 6;
+      const labelSpan = document.createElement('span');
+      labelSpan.innerHTML = `<strong>${escapeHtml(fe.file.name)}</strong> <small>(${fmtBytes(fe.file.size)})</small>`;
+      headerTd.appendChild(labelSpan);
+      const removeBtn = makeDelBtn(() => {
+        importFiles.splice(fileIdx, 1);
+        render();
+      });
+      removeBtn.style.float = 'right';
+      headerTd.appendChild(removeBtn);
+      headerTr.appendChild(headerTd);
+      tbody.appendChild(headerTr);
+
+      if (fe.inspecting) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6; td.className = 'inspecting-cell';
+        td.textContent = 'Inspecting…';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      if (!fe.plates.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6; td.className = 'inspecting-cell';
+        td.textContent = 'No plate info detected.';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      fe.plates.forEach(p => {
+        const tr = document.createElement('tr');
+
+        const td0 = document.createElement('td'); td0.className = 'qty-col';
+        td0.textContent = p.plate;
+        tr.appendChild(td0);
+
+        const td1 = document.createElement('td'); td1.className = 'color-col';
+        const wrap = document.createElement('div');
+        wrap.style.display = 'flex'; wrap.style.alignItems = 'center';
+        wrap.style.gap = '6px'; wrap.style.flexWrap = 'wrap';
+        (p.filaments || []).forEach(f => {
+          const sw = document.createElement('span');
+          sw.className = 'color-swatch';
+          sw.style.background = f.color_hex || '#999';
+          sw.title = `Slot ${f.slot}: ${f.color_name || f.color_hex} — ${f.used_g}g`;
+          wrap.appendChild(sw);
+        });
+        const inp = makeInput('text', p.color, ev => { p.color = ev.target.value; },
+          {placeholder: 'Colour name', autocomplete: 'off'});
+        inp.style.flex = '1'; inp.style.minWidth = '120px';
+        wrap.appendChild(inp);
+        td1.appendChild(wrap);
+        tr.appendChild(td1);
+
+        const td2 = document.createElement('td'); td2.className = 'scale-col';
+        td2.textContent = p.time_label;
+        tr.appendChild(td2);
+
+        const td3 = document.createElement('td'); td3.className = 'scale-col';
+        td3.textContent = (p.filament_g || 0).toFixed(1) + ' g';
+        tr.appendChild(td3);
+
+        const td4 = document.createElement('td');
+        td4.innerHTML = (p.objects || []).map(o => `<small>${escapeHtml(o)}</small>`).join('<br>');
+        tr.appendChild(td4);
+
+        const td5 = document.createElement('td'); td5.className = 'remove-col';
+        tr.appendChild(td5);
+
+        tbody.appendChild(tr);
+      });
+    });
+
+    const hasContent = importFiles.length > 0;
+    table.style.display = hasContent ? '' : 'none';
+    emptyMsg.style.display = hasContent ? 'none' : '';
+  }
+
+  function updateFlow() {
+    const slice = isSlice();
+    document.querySelectorAll('.slice-only').forEach(el => el.style.display = slice ? '' : 'none');
+    document.querySelectorAll('.import-only').forEach(el => el.style.display = slice ? 'none' : '');
+    picker.accept   = slice ? '.stl' : '.3mf';
+    picker.multiple = true;   // both flows allow multiple
+    if (slice) {
+      importFiles = [];
+    } else {
+      entries = [];
+    }
+    render();
+  }
+
+  async function inspect3mf(f) {
+    const fe = {file: f, plates: [], inspecting: true};
+    importFiles.push(fe);
+    render();
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch('/inspect-3mf', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      fe.plates = (data.plates || []).map(p => {
+        const fils = (p.filaments && p.filaments.length)
+          ? p.filaments
+          : (p.color_hex ? [{color_hex: p.color_hex, color_name: p.color_name, used_g: p.filament_g, slot: '1'}] : []);
+        const joined = fils.map(f => f.color_name || f.color_hex || '').filter(Boolean).join(' + ');
+        return {
+          plate: p.plate,
+          color: joined,
+          filaments: fils,
+          time_label: p.time_label,
+          filament_g: p.filament_g,
+          objects: p.objects || [],
+        };
+      });
+    } catch (e) {
+      alert(`Inspect failed for ${f.name}: ${e.message}`);
+    } finally {
+      fe.inspecting = false;
+      render();
+    }
+  }
+
+  addBtn.addEventListener('click', () => picker.click());
+
+  picker.addEventListener('change', (e) => {
+    const slice = isSlice();
+    const newFiles = Array.from(e.target.files);
+    if (slice) {
+      const defaultColor = entries.length ? entries[entries.length - 1].color : '';
+      const defaultScale = entries.length ? entries[entries.length - 1].scale : 1.0;
+      newFiles.forEach(f => entries.push({
+        file: f, qty: 1, color: defaultColor, scale: defaultScale,
+      }));
+      render();
+    } else {
+      newFiles.forEach(f => inspect3mf(f));
+    }
+    picker.value = '';
+  });
+
+  form.addEventListener('submit', (e) => {
+    const slice = isSlice();
+
+    if (slice && entries.length === 0) {
+      e.preventDefault(); alert('Add at least one STL.'); return;
+    }
+    if (!slice && importFiles.length === 0) {
+      e.preventDefault(); alert('Add at least one 3MF.'); return;
+    }
+    if (!slice && importFiles.some(fe => fe.inspecting)) {
+      e.preventDefault(); alert('Still inspecting one of the 3MFs — wait a moment.'); return;
+    }
+
+    if (slice) {
+      const missing = entries.find(en => !en.color.trim());
+      if (missing) { e.preventDefault(); alert(`Colour required for: ${missing.file.name}`); return; }
+      // Per-file scale is allowed; the backend buckets by (scale, colour).
+    } else {
+      for (const fe of importFiles) {
+        const missing = (fe.plates || []).find(p => !p.color.trim());
+        if (missing) {
+          e.preventDefault();
+          alert(`Colour required for plate ${missing.plate} of ${fe.file.name}.`);
+          return;
+        }
+      }
+    }
+
+    const dt = new DataTransfer();
+    if (slice) {
+      entries.forEach(en => dt.items.add(en.file));
+      qtyIn.value    = entries.map(en => en.qty).join(',');
+      colorsIn.value = entries.map(en => en.color.trim()).join(',');
+      scaleIn.value  = entries.map(en => String(en.scale)).join(',');
+      metaIn.value   = '';
+    } else {
+      importFiles.forEach(fe => dt.items.add(fe.file));
+      qtyIn.value    = '1';
+      // Backend looks up colors per file via metadata JSON; this top-level
+      // colors field stays empty for import.
+      colorsIn.value = '';
+      scaleIn.value  = '1.0';
+      metaIn.value   = JSON.stringify(importFiles.map(fe => ({
+        filename: fe.file.name,
+        colors: fe.plates.map(p => p.color.trim()),
+      })));
+    }
+    filesIn.files = dt.files;
+  });
+
+  radios.forEach(r => r.addEventListener('change', updateFlow));
+  updateFlow();
+})();
+</script>
+{% endblock %}

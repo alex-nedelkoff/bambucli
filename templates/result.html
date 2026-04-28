@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>{% if is_multi %}Order Group · {{ orders|length }} files{% else %}Order Processed{% endif %}</h2>
+
+  <dl class="summary">
+    <dt>Patron</dt>
+    <dd><strong>{{ customer }}</strong> — card {{ card }}</dd>
+
+    <dt>Total cost</dt>
+    <dd class="price">${{ "%.2f" % total_price }}</dd>
+
+    <dt>Total filament</dt>
+    <dd>{{ "%.1f" % total_grams }} g</dd>
+
+    <dt>Total time</dt>
+    <dd>{{ total_time_label }}</dd>
+
+    {% if is_multi %}
+    <dt>Files</dt>
+    <dd>{{ orders|length }} sliced 3MFs (each printed independently)</dd>
+    {% endif %}
+  </dl>
+
+  {% for order in orders %}
+    <div class="order-block">
+      <h3>{{ order.filename }}</h3>
+
+      {% if order.any_over_5h or order.any_outside_bed %}
+        <div class="warning">
+          {% if order.any_over_5h %}<p>At least one plate exceeds the 5-hour cap.</p>{% endif %}
+          {% if order.any_outside_bed %}<p>At least one plate has objects outside the build area.</p>{% endif %}
+        </div>
+      {% endif %}
+
+      <table class="plates">
+        <thead>
+          <tr>
+            <th>Plate</th>
+            <th>Colour</th>
+            <th>Grams</th>
+            <th>Time</th>
+            <th>Files</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in order.plates %}
+            <tr {% if p.over_5h %}class="row-warn"{% endif %}>
+              <td>{{ p.plate }}</td>
+              <td>{{ order.colors[loop.index0] if order.colors|length > 1 and loop.index0 < order.colors|length else (order.colors[0] if order.colors else '') }}</td>
+              <td>{{ "%.1f" % p.filament_g }}</td>
+              <td>{{ p.time_label }}{% if p.over_5h %} ⚠{% endif %}</td>
+              <td>
+                {% for obj in p.objects %}
+                  <div class="obj">{{ obj.name }}</div>
+                {% endfor %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="order-stats">
+        <span><strong>{{ order.plate_count }}</strong> {{ 'plate' if order.plate_count == 1 else 'plates' }}</span>
+        <span>· <strong>{{ "%.1f" % order.total_grams }}g</strong></span>
+        <span>· <strong>{{ order.total_time_label }}</strong></span>
+        <span>· <strong>${{ "%.2f" % order.price_cad }}</strong></span>
+      </div>
+
+      <div class="actions">
+        <a href="/download/{{ order.filename }}" class="button primary">Download 3MF</a>
+        <button type="button" class="button secondary print-receipt-btn"
+                data-order-idx="{{ loop.index0 }}">Print receipt</button>
+      </div>
+      <div class="receipt-status" data-status-idx="{{ loop.index0 }}"></div>
+    </div>
+  {% endfor %}
+
+  <div class="actions">
+    {% if is_multi %}
+      <button type="button" class="button primary" id="print-all-btn">Print all receipts</button>
+    {% endif %}
+    <a href="/" class="button secondary">New order</a>
+  </div>
+</div>
+
+<script>
+  (function() {
+    const orders = {{ orders | tojson }};
+
+    async function printReceipt(idx) {
+      const order = orders[idx];
+      const btn = document.querySelector(`.print-receipt-btn[data-order-idx="${idx}"]`);
+      const status = document.querySelector(`.receipt-status[data-status-idx="${idx}"]`);
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Printing…';
+      status.className = 'receipt-status';
+      status.textContent = '';
+
+      const fd = new FormData();
+      fd.append('output_3mf', order.output_3mf);
+      fd.append('customer',   order.customer);
+      fd.append('card',       order.card);
+      fd.append('colors',     (order.colors || []).join(','));
+
+      try {
+        const res = await fetch('/receipt', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        btn.textContent = '✓ Printed';
+        btn.classList.remove('secondary');
+        btn.classList.add('primary-done');
+        status.className = 'success-msg';
+        status.textContent = 'Receipt sent to the TM-T88V.';
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = original;
+        status.className = 'error-msg';
+        status.textContent = 'Print failed: ' + e.message;
+      }
+    }
+
+    document.querySelectorAll('.print-receipt-btn').forEach(btn => {
+      btn.addEventListener('click', () => printReceipt(parseInt(btn.dataset.orderIdx, 10)));
+    });
+
+    const printAllBtn = document.getElementById('print-all-btn');
+    if (printAllBtn) {
+      printAllBtn.addEventListener('click', async () => {
+        printAllBtn.disabled = true;
+        const original = printAllBtn.textContent;
+        printAllBtn.textContent = 'Printing all…';
+        for (let i = 0; i < orders.length; i++) {
+          await printReceipt(i);
+        }
+        printAllBtn.textContent = '✓ All receipts printed';
+        printAllBtn.classList.remove('primary');
+        printAllBtn.classList.add('primary-done');
+      });
+    }
+  })();
+</script>
+{% endblock %}

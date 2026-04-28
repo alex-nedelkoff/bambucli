@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <div class="history-header">
+    <h2>Order History</h2>
+    <div class="history-actions">
+      <button type="button" id="sync-btn" class="button secondary">Sync from disk</button>
+      <a href="/ledger.csv" class="button secondary">Download CSV</a>
+    </div>
+  </div>
+
+  <dl class="summary history-summary">
+    <dt>Orders</dt>            <dd>{{ total_orders }}</dd>
+    <dt>Total revenue</dt>     <dd class="price">${{ "%.2f" % total_price }}</dd>
+    <dt>Total filament</dt>    <dd>{{ "%.1f" % total_grams }} g</dd>
+    <dt>Total print time</dt>  <dd>{{ total_time_label }}</dd>
+  </dl>
+
+  <div class="field" style="margin-bottom: 0;">
+    <input type="text" id="history-search"
+           placeholder="Search by patron name or library card…"
+           autocomplete="off">
+  </div>
+
+  {% if records %}
+  <table class="history-table">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Patron</th>
+        <th>Flow</th>
+        <th>Printer</th>
+        <th>File</th>
+        <th>Plates</th>
+        <th>Mass</th>
+        <th>Time</th>
+        <th>Price</th>
+        <th class="actions-col"></th>
+      </tr>
+    </thead>
+    <tbody id="history-tbody">
+      {% for r in records %}
+      <tr class="order-row" data-search="{{ ((r.customer or '') ~ ' ' ~ (r.card or '')) | lower }}">
+        <td class="ts-cell">{{ r._short_date }}<br><small>{{ r._short_time }}</small></td>
+        <td>
+          <strong>{{ r.customer }}</strong>
+          <br><small class="card-num">{{ r.card }}</small>
+        </td>
+        <td><span class="flow-badge flow-{{ r.flow }}">{{ r.flow }}</span></td>
+        <td>{% if r.printer %}<span class="printer-badge printer-{{ r.printer }}">{{ r.printer | upper }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+        <td><code class="filename-cell">{{ r.filename }}</code></td>
+        <td class="numeric">{{ r.plate_count }}</td>
+        <td class="numeric">{{ "%.1f" % r.total_grams }} g</td>
+        <td class="numeric">{{ r.total_time_label }}</td>
+        <td class="numeric price-cell">${{ "%.2f" % r.price_cad }}</td>
+        <td class="actions-col">
+          {% if r._file_exists %}
+            <a href="/download/{{ r.filename }}" class="button-mini" title="Download 3MF">↓</a>
+            <button type="button" class="button-mini reprint-btn"
+                    title="Reprint receipt"
+                    data-3mf="{{ r.output_3mf }}"
+                    data-customer="{{ r.customer }}"
+                    data-card="{{ r.card }}"
+                    data-colors="{{ r.colors | join(',') }}">⎙</button>
+          {% endif %}
+          <button type="button" class="button-mini delete-btn"
+                  title="Delete order"
+                  data-filename="{{ r.filename }}"
+                  data-customer="{{ r.customer }}"
+                  data-price="{{ r.price_cad }}"
+                  data-file-on-disk="{{ '1' if r._file_exists else '0' }}">🗑</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p id="history-empty" class="empty-msg" style="display:none;">No orders match the search.</p>
+  {% else %}
+  <p class="empty-msg">No orders yet — submit one from the New Order page.</p>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  const search = document.getElementById('history-search');
+  const rows   = document.querySelectorAll('.order-row');
+  const empty  = document.getElementById('history-empty');
+
+  if (search) {
+    search.addEventListener('input', () => {
+      const q = search.value.trim().toLowerCase();
+      let visible = 0;
+      rows.forEach(row => {
+        const match = !q || row.dataset.search.includes(q);
+        row.style.display = match ? '' : 'none';
+        if (match) visible++;
+      });
+      if (empty) empty.style.display = visible ? 'none' : '';
+    });
+  }
+
+  document.querySelectorAll('.reprint-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '…';
+      const fd = new FormData();
+      fd.append('output_3mf', btn.dataset['3mf']);
+      fd.append('customer',   btn.dataset.customer);
+      fd.append('card',       btn.dataset.card);
+      fd.append('colors',     btn.dataset.colors || '');
+      try {
+        const res = await fetch('/receipt', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        btn.textContent = '✓';
+        setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 1800);
+      } catch (e) {
+        btn.textContent = '✕';
+        alert('Reprint failed: ' + e.message);
+        setTimeout(() => { btn.disabled = false; btn.textContent = original; }, 1800);
+      }
+    });
+  });
+
+  // Delete row + (optionally) the 3MF on disk.
+  document.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const filename = btn.dataset.filename;
+      const customer = btn.dataset.customer;
+      const price = btn.dataset.price;
+      const onDisk = btn.dataset.fileOnDisk === '1';
+      const msg = onDisk
+        ? `Delete order for ${customer} ($${price})?\n\nThis removes the ledger entry AND deletes the 3MF file from disk:\n  ${filename}\n\nThis cannot be undone.`
+        : `Delete ledger entry for ${customer} ($${price})?\n\n${filename}\n\nThis cannot be undone.`;
+      if (!confirm(msg)) return;
+
+      const fd = new FormData();
+      fd.append('filename', filename);
+      fd.append('delete_file', onDisk ? 'true' : 'false');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/orders/delete', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        // Drop the row from the DOM
+        const row = btn.closest('tr');
+        if (row) row.remove();
+      } catch (e) {
+        btn.disabled = false;
+        alert('Delete failed: ' + e.message);
+      }
+    });
+  });
+
+  // Sync from disk: scan printqueue/work and backfill missing ledger entries.
+  const syncBtn = document.getElementById('sync-btn');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', async () => {
+      syncBtn.disabled = true;
+      const original = syncBtn.textContent;
+      syncBtn.textContent = 'Scanning…';
+      try {
+        const res = await fetch('/history/sync', { method: 'POST' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.added_count > 0) {
+          alert(`Added ${data.added_count} order(s) from disk:\n  ${data.added.join('\n  ')}\n\nReloading…`);
+          location.reload();
+        } else {
+          syncBtn.textContent = 'Up to date';
+          setTimeout(() => { syncBtn.disabled = false; syncBtn.textContent = original; }, 2000);
+        }
+      } catch (e) {
+        syncBtn.disabled = false;
+        syncBtn.textContent = original;
+        alert('Sync failed: ' + e.message);
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}
