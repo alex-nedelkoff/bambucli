@@ -446,15 +446,7 @@ async def submit(
                 result = _slice(workdir, customer, bucket_color, stl_names, qtys, s, printer)
                 bucket_path = Path(result["output_3mf"])
                 bucket_outputs.append((bucket_path, bucket_color))
-                # Each plate in this bucket is attributed to bucket_color.
-                # If a bucket spilled to multi-plate (rare), we'd lose plates
-                # 2+ during the merge — guard against that explicitly.
                 bucket_plates = _inspect(bucket_path)["plates"]
-                if len(bucket_plates) > 1:
-                    raise HTTPException(400,
-                        f"Per-file scale path can't merge multi-plate buckets yet "
-                        f"({bucket_path.name} produced {len(bucket_plates)} plates). "
-                        "Submit those files as a separate same-scale order.")
                 plate_colors_seq.extend(bucket_color for _ in bucket_plates)
 
             when = datetime.now()

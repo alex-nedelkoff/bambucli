@@ -921,18 +921,25 @@ def _extract_build_and_resources(threedmodel_xml: str) -> tuple[str, str]:
 
 
 def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
-    """Merge N single-plate 3MFs into one multi-plate 3MF.
+    """Merge N (possibly multi-plate) 3MFs into one combined multi-plate 3MF.
 
-    Each source is (3mf_path, color_name). Plate order matches source order.
-    Color names feed the per-plate thumbnail swatch — pass them in the order
-    you want plates to appear in the printer's file list.
+    Each source is (3mf_path, color_name). Plates appear in the merged output
+    in source order; within a source, in source-plate-number order. The colour
+    is applied to every plate from that source — for true per-plate colour you
+    can attach those after via _make_printable's plates_meta argument.
+
+    For each source we maintain an object-id offset to keep the parent ids in
+    3D/3dmodel.model unique across sources; the offset is applied to all
+    object-id references inside that source's plate blocks too.
     """
     merged_resources: list[str] = []
     merged_builds: list[str] = []
     merged_side_models: dict[str, bytes] = {}
     offset = 0
 
-    # Collect per-source plate metadata for rewriting model_settings / slice_info
+    # Per-source bookkeeping (object blocks, source-level offset)
+    per_source: list[dict] = []
+    # One entry per OUTPUT plate (multi-plate sources contribute multiple)
     per_plate: list[dict] = []
 
     # Header bits copied from the first source once
@@ -941,6 +948,7 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
     project_settings: bytes = b""
     model_settings_rels: bytes = b""
     cut_info: bytes = b""
+    first_slice_info_header: str = ""
 
     for i, (src, color) in enumerate(sources):
         with zipfile.ZipFile(src, "r") as zin:
@@ -961,31 +969,92 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
                     model_settings_rels = zin.read("Metadata/_rels/model_settings.config.rels")
                 if "Metadata/cut_information.xml" in members:
                     cut_info = zin.read("Metadata/cut_information.xml")
-            # Per-plate files (source is single-plate: plate_1)
-            plate_gcode = zin.read("Metadata/plate_1.gcode")
-            plate_md5 = zin.read("Metadata/plate_1.gcode.md5")
-            plate_json = zin.read("Metadata/plate_1.json")
+                # Header preamble of slice_info.config (everything before the
+                # first <plate>) — copied from source 0 since these fields are
+                # client/version metadata, not per-plate data.
+                hdr = re.search(r"<config>(.*?)<plate>", slice_info_xml, re.DOTALL)
+                first_slice_info_header = hdr.group(1) if hdr else "\n"
 
-        # Offset the source's parent object ids so they don't collide.
+            # Discover every plate in this source by enumerating plate_N.json.
+            source_plate_nums = sorted({
+                int(re.search(r"plate_(\d+)\.json", m).group(1))
+                for m in members
+                if re.fullmatch(r"Metadata/plate_\d+\.json", m)
+            })
+
+            # Read each plate's per-plate files in one zip session.
+            plate_files: dict[int, dict] = {}
+            for pn in source_plate_nums:
+                plate_files[pn] = {
+                    "plate_gcode":     zin.read(f"Metadata/plate_{pn}.gcode"),
+                    "plate_md5":       zin.read(f"Metadata/plate_{pn}.gcode.md5"),
+                    "plate_json":      zin.read(f"Metadata/plate_{pn}.json"),
+                    "plate_png":       zin.read(f"Metadata/plate_{pn}.png")            if f"Metadata/plate_{pn}.png"            in members else b"",
+                    "plate_small_png": zin.read(f"Metadata/plate_{pn}_small.png")      if f"Metadata/plate_{pn}_small.png"      in members else b"",
+                    "plate_nl_png":    zin.read(f"Metadata/plate_no_light_{pn}.png")   if f"Metadata/plate_no_light_{pn}.png"   in members else b"",
+                    "top_png":         zin.read(f"Metadata/top_{pn}.png")              if f"Metadata/top_{pn}.png"              in members else b"",
+                    "pick_png":        zin.read(f"Metadata/pick_{pn}.png")             if f"Metadata/pick_{pn}.png"             in members else b"",
+                }
+
+        # Offset this source's parent object ids so they don't collide with
+        # other sources. Same offset applies to the source's plate blocks too.
         renumbered = _renumber_root_object_ids(threedmodel, offset)
         src_max_new_id = _max_root_object_id(renumbered)
         resources_inner, build_inner = _extract_build_and_resources(renumbered)
         merged_resources.append(resources_inner)
         merged_builds.append(build_inner)
 
-        per_plate.append({
+        # Apply the offset to model_settings.config object ids as well, then
+        # extract the source's <object> root blocks (these are the assembly
+        # definitions; they're per-source, not per-plate).
+        obj_pattern = re.compile(r'(<object\s+id=")(\d+)(")', re.DOTALL)
+        ms_xml_offset = obj_pattern.sub(
+            lambda m: f'{m.group(1)}{int(m.group(2)) + offset}{m.group(3)}',
+            model_settings_xml,
+        )
+        source_object_blocks = [
+            om.group(0)
+            for om in re.finditer(r"<object\s[^>]*>.*?</object>", ms_xml_offset, re.DOTALL)
+        ]
+
+        # Extract every <plate> block keyed by plater_id so we can pair it back
+        # to its source plate number when building per_plate entries below.
+        plate_blocks_in_ms: dict[int, str] = {}
+        for pm in re.finditer(r"<plate>(.*?)</plate>", ms_xml_offset, re.DOTALL):
+            inner = pm.group(1)
+            id_match = re.search(r'<metadata\s+key="plater_id"\s+value="(\d+)"', inner)
+            if id_match:
+                plate_blocks_in_ms[int(id_match.group(1))] = inner
+
+        plate_blocks_in_si: dict[int, str] = {}
+        for pm in re.finditer(r"<plate>(.*?)</plate>", slice_info_xml, re.DOTALL):
+            inner = pm.group(1)
+            id_match = re.search(r'<metadata\s+key="index"\s+value="(\d+)"', inner)
+            if id_match:
+                plate_blocks_in_si[int(id_match.group(1))] = inner
+
+        per_source.append({
+            "source_idx": i,
             "color": color,
-            "model_settings_xml": model_settings_xml,
-            "slice_info_xml": slice_info_xml,
-            "plate_gcode": plate_gcode,
-            "plate_md5": plate_md5,
-            "plate_json": plate_json,
             "offset": offset,
+            "object_blocks": source_object_blocks,
         })
+
+        # One per_plate entry per source plate, in source-plate order.
+        for pn in source_plate_nums:
+            per_plate.append({
+                "source_idx": i,
+                "color": color,
+                "object_id_offset": offset,
+                "source_plate_num": pn,
+                "ms_plate_inner": plate_blocks_in_ms.get(pn, ""),
+                "si_plate_inner": plate_blocks_in_si.get(pn, ""),
+                **plate_files[pn],
+            })
 
         offset = src_max_new_id  # next source starts past this one
 
-    # Build the unified 3dmodel.model
+    # Build the unified 3dmodel.model — same per-source approach as before.
     merged_3dmodel = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<model unit="millimeter" xml:lang="en-US"'
@@ -1002,9 +1071,6 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
     )
 
     # Rewrite 3D/_rels/3dmodel.model.rels — union of all side-model references.
-    # OrcaSlicer's original .rels lists every .model side file by path. We just
-    # regenerate it from the side-model filenames we've collected, since the
-    # relationship IDs are opaque strings we can make up.
     rels_entries = []
     for rid, name in enumerate(sorted(merged_side_models.keys()), start=1):
         path_in_pkg = "/" + name
@@ -1020,62 +1086,53 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
     ).encode("utf-8")
 
     # Merge model_settings.config:
-    # - Keep all <object> elements from each source (with offset applied to id)
-    # - Keep <plate> elements with renumbered plater_id + file paths + object_id refs
+    #   - Union all <object> blocks across sources (deduped via per_source which
+    #     has them once per source, not per plate)
+    #   - Emit one <plate> block per output plate, with plater_id + file paths
+    #     remapped from the source plate number to the new global index
     ms_object_blocks: list[str] = []
+    for ps in per_source:
+        ms_object_blocks.extend(ps["object_blocks"])
+
     ms_plate_blocks: list[str] = []
     si_plate_blocks: list[str] = []
 
     for new_idx, pp in enumerate(per_plate, start=1):
-        off = pp["offset"]
-        ms_xml = pp["model_settings_xml"]
+        off = pp["object_id_offset"]
+        source_pn = pp["source_plate_num"]
 
-        # Extract <object> elements, offset their id= attrs + referenced part ids
-        obj_pattern = re.compile(r'(<object\s+id=")(\d+)(")', re.DOTALL)
-        ms_xml_offset = obj_pattern.sub(
-            lambda m: f'{m.group(1)}{int(m.group(2)) + off}{m.group(3)}',
-            ms_xml,
-        )
-        # Extract <plate>...</plate> blocks and <object...>...</object> blocks
-        for om in re.finditer(r"<object\s[^>]*>.*?</object>", ms_xml_offset, re.DOTALL):
-            ms_object_blocks.append(om.group(0))
-
-        plate_match = re.search(r"<plate>(.*?)</plate>", ms_xml_offset, re.DOTALL)
-        if plate_match:
-            inner = plate_match.group(1)
-            # Offset object_id refs inside this plate's model_instance blocks
+        ms_inner = pp["ms_plate_inner"]
+        if ms_inner:
+            # Offset object_id refs inside this plate's model_instance blocks.
             inner = re.sub(
                 r'(<metadata\s+key="object_id"\s+value=")(\d+)(")',
                 lambda m: f'{m.group(1)}{int(m.group(2)) + off}{m.group(3)}',
-                inner,
+                ms_inner,
             )
-            # Renumber plater_id → new_idx
+            # Renumber plater_id → new global index
             inner = re.sub(
                 r'(<metadata\s+key="plater_id"\s+value=")\d+(")',
                 rf'\g<1>{new_idx}\g<2>',
                 inner,
             )
-            # Rewrite file paths: plate_1.gcode → plate_<new_idx>.gcode etc
+            # Rewrite file paths: source's plate_<source_pn>.X → plate_<new_idx>.X
             for key in ("gcode_file", "thumbnail_file", "thumbnail_no_light_file",
                         "top_file", "pick_file", "pattern_bbox_file"):
                 inner = re.sub(
-                    rf'(<metadata\s+key="{key}"\s+value="Metadata/)([^"]+?)(_|\.)1(\.\w+)(")',
+                    rf'(<metadata\s+key="{key}"\s+value="Metadata/)([^"]+?)([._]){source_pn}(\.\w+)(")',
                     rf'\g<1>\g<2>\g<3>{new_idx}\g<4>\g<5>',
                     inner,
                 )
             ms_plate_blocks.append(f"<plate>{inner}</plate>")
 
-        # slice_info.config: extract the single <plate>, renumber index
-        si_xml = pp["slice_info_xml"]
-        si_plate_match = re.search(r"<plate>(.*?)</plate>", si_xml, re.DOTALL)
-        if si_plate_match:
-            inner = si_plate_match.group(1)
-            inner = re.sub(
+        si_inner = pp["si_plate_inner"]
+        if si_inner:
+            si_renumbered = re.sub(
                 r'(<metadata\s+key="index"\s+value=")\d+(")',
                 rf'\g<1>{new_idx}\g<2>',
-                inner,
+                si_inner,
             )
-            si_plate_blocks.append(f"<plate>{inner}</plate>")
+            si_plate_blocks.append(f"<plate>{si_renumbered}</plate>")
 
     merged_model_settings = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n'
@@ -1085,17 +1142,14 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
         + '</config>\n'
     ).encode("utf-8")
 
-    # Preserve slice_info.config header from source 0 + merged plates
-    si_header = re.search(r"<config>(.*?)<plate>", per_plate[0]["slice_info_xml"], re.DOTALL)
-    si_header_text = si_header.group(1) if si_header else "<config>\n"
     merged_slice_info = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<config>' + si_header_text.split("<config>", 1)[-1]
+        '<config>' + first_slice_info_header.split("<config>", 1)[-1]
         + "\n".join(si_plate_blocks) + "\n"
         + '</config>\n'
     ).encode("utf-8")
 
-    # Write the merged 3MF
+    # Write the merged 3MF — per-plate files renumbered to the new global index.
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
         zout.writestr("[Content_Types].xml", content_types)
         zout.writestr("_rels/.rels", rels_root)
@@ -1104,9 +1158,22 @@ def _merge_3mfs(sources: list[tuple[Path, str]], out_path: Path) -> None:
         for name, data in merged_side_models.items():
             zout.writestr(name, data)
         for new_idx, pp in enumerate(per_plate, start=1):
-            zout.writestr(f"Metadata/plate_{new_idx}.gcode", pp["plate_gcode"])
+            zout.writestr(f"Metadata/plate_{new_idx}.gcode",     pp["plate_gcode"])
             zout.writestr(f"Metadata/plate_{new_idx}.gcode.md5", pp["plate_md5"])
-            zout.writestr(f"Metadata/plate_{new_idx}.json", pp["plate_json"])
+            zout.writestr(f"Metadata/plate_{new_idx}.json",      pp["plate_json"])
+            # Thumbnails (if the source had them — _make_printable will
+            # regenerate label-style ones afterwards anyway, but copying
+            # whatever's there means a partial output is still valid).
+            if pp["plate_png"]:
+                zout.writestr(f"Metadata/plate_{new_idx}.png",            pp["plate_png"])
+            if pp["plate_small_png"]:
+                zout.writestr(f"Metadata/plate_{new_idx}_small.png",      pp["plate_small_png"])
+            if pp["plate_nl_png"]:
+                zout.writestr(f"Metadata/plate_no_light_{new_idx}.png",   pp["plate_nl_png"])
+            if pp["top_png"]:
+                zout.writestr(f"Metadata/top_{new_idx}.png",              pp["top_png"])
+            if pp["pick_png"]:
+                zout.writestr(f"Metadata/pick_{new_idx}.png",             pp["pick_png"])
         zout.writestr("Metadata/model_settings.config", merged_model_settings)
         zout.writestr("Metadata/slice_info.config", merged_slice_info)
         zout.writestr("Metadata/project_settings.config", project_settings)
