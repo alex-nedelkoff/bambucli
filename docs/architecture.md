@@ -4,6 +4,10 @@ A reference doc for *you* (Alex) to read end-to-end and feel grounded on every
 component. Written so that after reading it you can confidently demo, debug,
 or talk through any layer in a meeting.
 
+Companion doc: `docs/glossary.md` — every term in this document with a
+plain + technical definition, alphabetically. When something here uses a
+term that doesn't ring a bell, the glossary is the lookup.
+
 This is internal-architecture material, not user-facing docs. If you license
 BambuCLI to the library, ship them `SETUP.md` and `DEPLOY_README.md` — keep
 this one to yourself.
