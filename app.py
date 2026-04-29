@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -341,7 +341,7 @@ def _parse_convention_filename(name: str) -> dict | None:
     }
 
 
-@app.post("/submit", response_class=HTMLResponse)
+@app.post("/submit")
 async def submit(
     request: Request,
     intake: str = Form(...),
@@ -357,7 +357,10 @@ async def submit(
     printer: str = Form(DEFAULT_PRINTER),
     import_metadata: str = Form(""),
     files: list[UploadFile] = File(...),
-) -> HTMLResponse:
+    # Programmatic clients (slice-orders-bulk skill, scripts) pass format=json
+    # to skip the result.html template and get the order records directly.
+    format: str = Form(""),
+):
     if printer not in PRINTERS:
         raise HTTPException(400, f"unknown printer '{printer}'. Choices: {', '.join(sorted(PRINTERS))}")
     files = [f for f in files if f.filename]
@@ -557,7 +560,7 @@ async def submit(
     total_time = sum(o["total_time_seconds"] for o in orders)
     total_price = round(sum(o["price_cad"] for o in orders), 2)
 
-    return templates.TemplateResponse(request, "result.html", {
+    payload = {
         "orders": orders,
         "customer": customer,
         "card": card,
@@ -566,7 +569,10 @@ async def submit(
         "total_time_label": _fmt_time(total_time),
         "total_price": total_price,
         "is_multi": len(orders) > 1,
-    })
+    }
+    if format.lower() == "json":
+        return JSONResponse(payload)
+    return templates.TemplateResponse(request, "result.html", payload)
 
 
 @app.post("/receipt")
