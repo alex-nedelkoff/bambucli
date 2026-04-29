@@ -635,7 +635,7 @@ to an SD card.
 | `Bambu Lab P1S 0.4 nozzle - Copy.json` | P1S machine profile |
 | `process.json`, `process_cli.json` | Process profile + small CLI overlay (auto-supports + G92 reset) |
 | `filament.json` | Default filament fallback (rarely used; per-printer files take precedence) |
-| `Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json` | Generic PLA filament profile (X1C-tuned). Originally exported from an ELEGOO preset, now retuned to match BambuStudio's "Generic PLA - No Aux Fan" — most importantly `filament_max_volumetric_speed = 12 mm³/s` (was 21) so X1C firmware doesn't throttle to silent mid-print on flow-limited segments. |
+| `Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json` | PLA filament profile (X1C-tuned). Aux fan stays OFF because the chamber's aux fan is asymmetrically placed (left side only) and causes uneven curling on large flat prints. **`filament_max_volumetric_speed = 21 mm³/s`** matches Bambu PLA Basic — keeping it lower (e.g. 12, the no-aux-fan reference value) actively *triggers* the X1C's mid-print throttle to silent because the firmware leaves no margin around the ceiling. See lore note in §9. |
 | `machine.json` | Aggregate machine profile (legacy; superseded by per-printer files) |
 | `0.20mm Standard …`, `0.24 Draft …` etc. | OrcaSlicer-bundled process presets — the `inherits` chain points to these |
 | `install.sh` | Homebrew + Python deps + OrcaSlicer trust-prompt |
@@ -673,18 +673,31 @@ to an SD card.
   cosmetically. Doesn't matter for the SD-card flow.
 - **PLA mass formula:** `used_m × 2.98 g/m`. Holds for 1.75 mm × 1.24 g/cm³
   PLA. If you switch to PETG/TPU/ABS, that constant changes.
-- **`filament_max_volumetric_speed` is the throttle trigger.** The slicer
-  honors this as a hard ceiling on flow rate (mm³/s). If the value is too
-  optimistic, the slicer will command print speeds that look fine on paper
-  but cause the X1C firmware to drop to silent mode mid-print to protect
-  the hotend. Bambu's reference profiles use **12 mm³/s for PLA**; that's
-  what we match. Higher values like 18–21 (which some vendor profiles
-  advertise) are not real-world sustainable on the X1C and will trigger
-  adaptive throttling, paradoxically making prints **slower** than the
-  conservative setting because silent mode is 50% across the board. If
-  someone changes this back up, expect the symptom: optimistic time
-  estimates + real prints taking ~2× longer than estimated + speed-mode
-  reverts to silent on the touchscreen.
+- **`filament_max_volumetric_speed` is the throttle trigger — but in the
+  *opposite* direction from what looks intuitive.** The slicer caps
+  commanded speeds at this value AND embeds it in the 3MF as metadata.
+  The X1C firmware reads that metadata and treats it as the *safety
+  ceiling* with very little margin around it. Real per-segment flow has
+  natural jitter (extruder slip, viscosity changes, layer-change pressure
+  spikes) — even when the slicer planned for 11 mm³/s, real flow can
+  briefly hit 13. If the ceiling is set tight (e.g. 12), the firmware
+  treats those spikes as violations and drops to silent mode (50%) to
+  pull flow back under the ceiling. There's no "safety margin" allowance.
+  Setting the ceiling **higher** (21, matching Bambu PLA Basic) gives the
+  printer headroom and stops the panic-throttle.
+  - **We use 21 mm³/s** to match Bambu PLA Basic, even though the profile
+    is named "Generic PLA - No Aux Fan." The "no aux fan" part is real —
+    on this X1C the aux fan is asymmetrically placed (left side only), so
+    it's left off to avoid one-sided cooling and curling on large flat
+    prints. We accept the resulting cooling tradeoff (slightly worse
+    overhangs) but keep the volumetric ceiling at 21 because **lowering
+    it does not help — it actively triggers throttling**.
+  - **Don't drop this back to 12 to "be safe."** That's the trap. The
+    ceiling has to be set above where real-world flow jitter peaks, not
+    at the average. Bambu's "Generic PLA - No Aux Fan" preset uses 12
+    because it expects matching aux-fan-off prints to also run at lower
+    process speeds; we don't change process speeds, so the ceiling has to
+    move up instead.
 - **`--clone-objects "4,2"`** takes one count per file, not (index, count)
   pairs. A common mistake when reading the help.
 - **`--curr-bed-type` isn't in the help.** Set via `curr_bed_type` in a
