@@ -5,7 +5,7 @@ Pipeline for turning a patron's 3D print order (`.eml` email) into a sliced `.3m
 ## What this does
 
 1. Reads an `.eml` email with STL attachments + patron info (name, card number, color, quantity).
-2. Invokes OrcaSlicer's CLI with X1C settings + ELEGOO PLA filament + tree supports.
+2. Invokes OrcaSlicer's CLI with X1C settings + Generic PLA filament + tree supports.
 3. Produces a printer-compatible `.3mf` with embedded print labels (color swatch, patron name, plate N-of-M, time, mass) as the plate thumbnails.
 4. Drops the final file into `printqueue/work/` named like `Aria_Apr 21_41.8g_1h26m.3mf`.
 
@@ -29,7 +29,7 @@ Copy the entire `BambuCLI/` folder to the new host. Layout looks like:
 BambuCLI/
 ├── slice_order.py                                   # the pipeline (orchestrator + CLI)
 ├── process_cli.json                                 # our 0.24mm Draft overlay (supports, G92 E0)
-├── ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json   # filament preset
+├── Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json   # filament preset
 ├── printqueue/
 │   ├── inbox/        # (optional future dir for .eml drops; currently emails land in printqueue/ directly)
 │   ├── work/         # per-order workdirs + final sliced 3MFs
@@ -339,7 +339,7 @@ This pipeline stores patron personal information — full names, 14-digit librar
 | OrcaSlicer bundled profiles    | `/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL/`                               |
 | Pipeline code                  | `BambuCLI/slice_order.py`                                                                     |
 | Process overlay                | `BambuCLI/process_cli.json`                                                                   |
-| Filament preset                | `BambuCLI/ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json`                         |
+| Filament preset                | `BambuCLI/Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json`                      |
 | Email queue (inbox)            | `BambuCLI/printqueue/`                                                                        |
 | Per-order scratch + final 3MFs | `BambuCLI/printqueue/work/`                                                                   |
 | Archived emails                | `BambuCLI/printqueue/processed/`                                                              |

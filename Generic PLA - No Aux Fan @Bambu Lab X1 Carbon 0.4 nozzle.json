@@ -113,7 +113,7 @@
         "1"
     ],
     "filament_max_volumetric_speed": [
-        "21"
+        "12"
     ],
     "filament_minimal_purge_on_wipe_tower": [
         "15"
@@ -164,7 +164,7 @@
         "nil"
     ],
     "filament_settings_id": [
-        "ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle"
+        "Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle"
     ],
     "filament_shrink": [
         "100%"
@@ -197,7 +197,7 @@
         "100"
     ],
     "filament_vendor": [
-        "ELEGOO"
+        "Generic"
     ],
     "filament_wipe": [
         "nil"
@@ -226,7 +226,7 @@
     ],
     "inherits": "",
     "is_custom_defined": "0",
-    "name": "ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle",
+    "name": "Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle",
     "nozzle_temperature": [
         "220"
     ],

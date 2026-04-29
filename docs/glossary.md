@@ -130,8 +130,8 @@ Alphabetical by term.
 ### inheritance chain (slicer profiles)
 
 - **Plain:** Slicer profiles can be based on other profiles, layering small
-  tweaks on top of a base. An ELEGOO-PLA profile inherits from a generic
-  PLA profile, which inherits from a generic filament profile.
+  tweaks on top of a base. A vendor-specific PLA profile inherits from a
+  generic PLA profile, which inherits from a generic filament profile.
 - **Tech:** Linked list of profile JSONs traversed via the `inherits` field.
   OrcaSlicer's GUI walks the chain at load time and presents a flattened
   view; **the CLI does not walk it** when profiles are passed via

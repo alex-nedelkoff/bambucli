@@ -593,7 +593,7 @@ User on MacBook runs `/slice-orders-bulk` in Claude Code:
      `printqueue/work/20260428-220015-john-web/`.
    - Buckets the files: one bucket `(scale=1.0, colour=Red)` with both STLs.
    - One bucket → single slicer call. Resolves profiles (X1C machine + Draft
-     process + ELEGOO PLA filament), invokes OrcaSlicer with
+     process + Generic PLA filament), invokes OrcaSlicer with
      `--clone-objects "4,2" --arrange 1 --orient 1 --slice 0`.
    - OrcaSlicer arranges: 4 dragons + 2 cubes don't fit on one bed → it
      spills to plate 2. Slices both plates. Writes the 3MF.
@@ -635,7 +635,7 @@ to an SD card.
 | `Bambu Lab P1S 0.4 nozzle - Copy.json` | P1S machine profile |
 | `process.json`, `process_cli.json` | Process profile + small CLI overlay (auto-supports + G92 reset) |
 | `filament.json` | Default filament fallback (rarely used; per-printer files take precedence) |
-| `ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json` | ELEGOO PLA filament profile, X1C-tuned |
+| `Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json` | Generic PLA filament profile (X1C-tuned). Originally exported from an ELEGOO preset, now retuned to match BambuStudio's "Generic PLA - No Aux Fan" — most importantly `filament_max_volumetric_speed = 12 mm³/s` (was 21) so X1C firmware doesn't throttle to silent mid-print on flow-limited segments. |
 | `machine.json` | Aggregate machine profile (legacy; superseded by per-printer files) |
 | `0.20mm Standard …`, `0.24 Draft …` etc. | OrcaSlicer-bundled process presets — the `inherits` chain points to these |
 | `install.sh` | Homebrew + Python deps + OrcaSlicer trust-prompt |
@@ -673,6 +673,18 @@ to an SD card.
   cosmetically. Doesn't matter for the SD-card flow.
 - **PLA mass formula:** `used_m × 2.98 g/m`. Holds for 1.75 mm × 1.24 g/cm³
   PLA. If you switch to PETG/TPU/ABS, that constant changes.
+- **`filament_max_volumetric_speed` is the throttle trigger.** The slicer
+  honors this as a hard ceiling on flow rate (mm³/s). If the value is too
+  optimistic, the slicer will command print speeds that look fine on paper
+  but cause the X1C firmware to drop to silent mode mid-print to protect
+  the hotend. Bambu's reference profiles use **12 mm³/s for PLA**; that's
+  what we match. Higher values like 18–21 (which some vendor profiles
+  advertise) are not real-world sustainable on the X1C and will trigger
+  adaptive throttling, paradoxically making prints **slower** than the
+  conservative setting because silent mode is 50% across the board. If
+  someone changes this back up, expect the symptom: optimistic time
+  estimates + real prints taking ~2× longer than estimated + speed-mode
+  reverts to silent on the touchscreen.
 - **`--clone-objects "4,2"`** takes one count per file, not (index, count)
   pairs. A common mistake when reading the help.
 - **`--curr-bed-type` isn't in the help.** Set via `curr_bed_type` in a

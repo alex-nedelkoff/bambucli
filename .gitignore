@@ -39,3 +39,7 @@ BambuAPI/
 # Personal/career notes — not for the repo.
 docs/BambuCLI_meeting_prep.md
 docs/email_intake_scope.md
+
+# Ad-hoc debug dumps (printer logs, comparison 3MFs). Encrypted printer logs
+# from Bambu can be hundreds of MB — never commit these.
+debug_*/

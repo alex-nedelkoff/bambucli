@@ -92,7 +92,7 @@ BambuCLI/
 ├── app.py                      ← FastAPI web app
 ├── slice_order.py              ← slicer orchestrator (CLI)
 ├── process_cli.json            ← OrcaSlicer process overlay (X1C, 0.24 Draft, no brim, tree supports)
-├── ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json   ← filament preset
+├── Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json   ← filament preset
 ├── templates/                  ← Jinja2 HTML
 ├── static/style.css            ← brand styling
 └── printqueue/

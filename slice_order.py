@@ -34,7 +34,7 @@ ORCA_BUNDLE = Path("/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL
 PRINT_QUEUE = BASE_DIR / "printqueue"
 WORK_DIR = PRINT_QUEUE / "work"
 PROCESS_OVERLAY = BASE_DIR / "process_cli.json"
-FILAMENT_JSON = BASE_DIR / "ELEGOO PLA No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json"
+FILAMENT_JSON = BASE_DIR / "Generic PLA - No Aux Fan @Bambu Lab X1 Carbon 0.4 nozzle.json"
 
 # Per-printer machine + process selection. Each printer has its own start/end
 # gcode (X1C uses lidar/scanner commands the P1S can't run; P1S firmware checks
@@ -474,8 +474,8 @@ def _make_printable(
 
 def _prep_filament(filament_src: Path, printer_canonical_name: str) -> Path:
     """Make a runtime copy of the filament JSON whose `compatible_printers`
-    list includes the target printer. The user's exported ELEGOO preset is
-    locked to the X1C — without this, slicing for P1S fails with "filament
+    list includes the target printer. The base filament preset is locked to
+    the X1C — without this, slicing for P1S fails with "filament
     not compatible with printer" before any actual slicing happens."""
     SLICER_OUT.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", printer_canonical_name)
