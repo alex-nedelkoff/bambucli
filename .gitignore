@@ -35,3 +35,6 @@ venv/
 # the slicer/web pipeline. Has its own .git which git would treat as a
 # submodule otherwise.
 BambuAPI/
+
+# Personal/career notes — not for the repo.
+docs/BambuCLI_meeting_prep.md
