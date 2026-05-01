@@ -673,6 +673,30 @@ to an SD card.
   cosmetically. Doesn't matter for the SD-card flow.
 - **PLA mass formula:** `used_m × 2.98 g/m`. Holds for 1.75 mm × 1.24 g/cm³
   PLA. If you switch to PETG/TPU/ABS, that constant changes.
+- **Future investigation: OrcaSlicer-specific throttle triggers.** The
+  Apr 29 debug session looked at why X1C prints drop to silent mid-print
+  even with volumetric speed set correctly. Three OrcaSlicer-vs-BambuStudio
+  output differences popped on the same model:
+  - **`accel_to_decel_enable = 1`** in Orca, `0` in Bambu. Enabled, Orca
+    applies a 50% asymmetric multiplier between accel and decel ramps —
+    which makes the firmware planner handle motion profiles where
+    accelerating is faster than decelerating. Some Bambu users report this
+    correlates with motion-monitor false positives.
+  - **Part-cooling fan cycling: 297× in Orca vs 2× in Bambu** for the same
+    model. Orca's layer-time-based cooling logic (driven by `min_layer_time`
+    / `slow_down_for_layer_cooling`) toggles the fan rapidly. Rapid melt-
+    zone cooling-rate changes produce small flow variances which the X1C's
+    flow-inconsistency monitor may flag.
+  - **M204 (acceleration-set) frequency: ~7200 in Orca vs ~3900 in Bambu.**
+    Orca oscillates between {2000, 5000, 10000} accel values constantly
+    (~5800 transitions); Bambu uses larger blocks of one value at a time.
+  We didn't change anything here yet — current setup works well enough at
+  21 mm³/s. If throttling reappears as a recurring problem, the surgical
+  fix is `accel_to_decel_enable: 0` in `process_cli.json`. Falling back
+  options: cap accel-tier oscillation, then disable layer-time cooling.
+  Full analysis sat in chat history Apr 29 — re-derive from the
+  `debug_apr29/` Jar 3MFs if needed (same approach: M-code histograms +
+  `M204 S*` distribution on Orca vs Bambu output of the same model).
 - **`filament_max_volumetric_speed` is the throttle trigger — but in the
   *opposite* direction from what looks intuitive.** The slicer caps
   commanded speeds at this value AND embeds it in the 3MF as metadata.

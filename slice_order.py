@@ -1477,6 +1477,7 @@ def _render_receipt_text(
     lines.append("")
     lines.append(f"  Card:  {_format_card(card)}")
     lines.append(f"  Date:  {when.strftime('%b %-d, %Y  %-I:%M %p')}")
+    lines.append(f"  Needs waiver signed             [ ]")
     lines.append(thin)
 
     # Broadcast single colour to all plates if only one provided
@@ -1521,7 +1522,7 @@ def _render_receipt_text(
     lines.append(f"  Order taken by:     {ORDER_TAKEN_BY}")
     lines.append(f"  Charged in Koha                [ ]")
     lines.append(f"  Order completed by: _________________")
-    lines.append(f"  SD card:            _________________")
+    lines.append(f"  SD card:            R1   R2   R3   B1")
     lines.append(f"  Printer:            1    2    3")
     lines.append("")
     lines.append(f"  Customer contacted for pickup  [ ]")
@@ -1587,6 +1588,7 @@ def _send_to_tm_t88v(
 
     p.text(f"  Card:  {_format_card(card)}\n")
     p.text(f"  Date:  {when.strftime('%b %-d, %Y  %-I:%M %p')}\n")
+    p.text(f"  Needs waiver signed             [ ]\n")
     p.text(thin + "\n")
 
     plate_colors = colors if len(colors) == len(plates) else [colors[0]] * len(plates)
@@ -1630,7 +1632,7 @@ def _send_to_tm_t88v(
     p.text(f"  Order taken by:     {ORDER_TAKEN_BY}\n")
     p.text(f"  Charged in Koha                [ ]\n")
     p.text(f"  Order completed by: _________________\n")
-    p.text(f"  SD card:            _________________\n")
+    p.text(f"  SD card:            R1   R2   R3   B1\n")
     p.text(f"  Printer:            1    2    3\n")
     p.text("\n")
     p.text(f"  Customer contacted for pickup  [ ]\n")
