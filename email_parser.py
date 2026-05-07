@@ -97,9 +97,11 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
 OLLAMA_TIMEOUT_S = 30
 
-# Ajax library cards are 14 digits; allow patron-typed dashes/dots/spaces
-# between the four-character groups.
-_CARD_RE = re.compile(r"\b(\d{4}[\s\-.]?\d{4}[\s\-.]?\d{4}[\s\-.]?\d{2})\b")
+# Ajax library cards are 14 digits. Allow patron-typed separators (space,
+# dash, dot) anywhere between digits — patrons group the digits in all
+# kinds of unpredictable ways: "XXXX XXXX XXXX XX", "X XXXX XXXXXXXX X",
+# "XXXX-XXXX-XXXX-XX", or just "XXXXXXXXXXXXXX" with no separators at all.
+_CARD_RE = re.compile(r"\b(\d(?:[\s\-.]?\d){13})\b")
 
 
 def regex_card(body: str) -> str | None:
