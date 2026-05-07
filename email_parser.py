@@ -18,7 +18,79 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
+
+
+# Hosts where a URL almost always means "the patron is sending you a file
+# via link instead of as an attachment." Match exact host or any subdomain
+# of these. We treat a hit as a strong signal to flag the email for staff
+# review — never auto-fetch.
+_SHARE_HOSTS = {
+    # Generic file-sharing
+    "drive.google.com", "docs.google.com",
+    "1drv.ms", "onedrive.live.com",
+    "dropbox.com",
+    "wetransfer.com", "we.tl",
+    "mega.nz", "mega.io",
+    "icloud.com",
+    "box.com",
+    # 3D-model sharing sites — patrons sometimes link to a model rather than
+    # attach the file. We can't auto-fetch (login walls, CDN auth, etc.) so
+    # staff has to download it themselves.
+    "thingiverse.com",
+    "printables.com",
+    "makerworld.com",
+    "cults3d.com",
+    "myminifactory.com",
+}
+
+# Direct-file URL extensions. A URL ending in any of these is treated as a
+# share-kind link regardless of host (e.g. a self-hosted .stl on someone's
+# personal blog).
+_FILE_EXTS = (".stl", ".3mf", ".zip", ".rar", ".7z", ".obj", ".ply")
+
+_URL_RE = re.compile(r"https?://[^\s<>\"'\)\]\}]+", re.IGNORECASE)
+
+
+def scan_links(body: str) -> list[dict]:
+    """Find URLs in the email body and classify them. Returns a list of
+    {url, kind, host} dicts, deduped, in body order. `kind` is "share" if
+    the URL points at a known file-sharing host or ends in a model-file
+    extension; "other" otherwise.
+
+    Never fetches anything. Just regex + classification — the safety layer
+    is built around the assumption that staff manually downloads any
+    file referenced in an email."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for m in _URL_RE.finditer(body or ""):
+        url = m.group(0).rstrip(".,;:!?")  # trim trailing prose punctuation
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            host = (urllib.parse.urlparse(url).netloc or "").lower()
+        except Exception:
+            host = ""
+        # strip a leading www. for matching purposes; matching list is bare host
+        host_for_match = host[4:] if host.startswith("www.") else host
+
+        kind = "other"
+        if host_for_match and any(
+            host_for_match == h or host_for_match.endswith("." + h)
+            for h in _SHARE_HOSTS
+        ):
+            kind = "share"
+        else:
+            # Strip query/fragment before extension check so
+            # https://example.com/foo.stl?dl=1 still classifies as share.
+            path = urllib.parse.urlparse(url).path.lower()
+            if path.endswith(_FILE_EXTS):
+                kind = "share"
+
+        out.append({"url": url, "kind": kind, "host": host})
+    return out
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -136,4 +208,5 @@ def parse_email(body: str, stl_names: list[str], from_header: str = "") -> dict:
         "colors":      ",".join(colors),
         "quantity":    ",".join(qtys),
         "ollama_used": bool(llm),
+        "links":       scan_links(body),
     }

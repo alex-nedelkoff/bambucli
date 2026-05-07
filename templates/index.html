@@ -28,6 +28,7 @@
     pre-fill name, card, colour, and quantity. Review the table below before
     submitting; edit anything that's wrong.</small>
     <div id="eml-status" style="margin-top:8px;"></div>
+    <div id="eml-links" style="margin-top:8px;"></div>
   </div>
 
   <input type="hidden" name="workdir_token" id="workdir-token" value="">
@@ -325,7 +326,68 @@
 
   const emlInput  = document.getElementById('eml-file');
   const emlStatus = document.getElementById('eml-status');
+  const emlLinks  = document.getElementById('eml-links');
   const tokenIn   = document.getElementById('workdir-token');
+
+  // Tracks whether the most recent .eml parse found share-kind links AND no
+  // STL attachments. In that state we block submit — staff must manually
+  // download the linked file(s) and switch back to STL/3MF upload mode.
+  let emailBlocked = false;
+
+  function renderLinkWarnings(links, hasFiles) {
+    emlLinks.innerHTML = '';
+    emailBlocked = false;
+    if (!links || !links.length) return;
+
+    const share = links.filter(l => l.kind === 'share');
+    const other = links.filter(l => l.kind === 'other');
+
+    function makeBox(bg, border, color, html) {
+      const div = document.createElement('div');
+      div.style.cssText =
+        `padding:10px 12px; border-radius:6px; margin-top:6px;` +
+        `background:${bg}; border:1px solid ${border}; color:${color};` +
+        `font-size:0.9em;`;
+      div.innerHTML = html;
+      return div;
+    }
+
+    function linkList(arr) {
+      return '<ul style="margin:6px 0 0; padding-left:20px;">' +
+        arr.map(l =>
+          `<li><a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">` +
+          `${escapeHtml(l.url)}</a> <small>(${escapeHtml(l.host)})</small></li>`
+        ).join('') +
+        '</ul>';
+    }
+
+    if (share.length && !hasFiles) {
+      emailBlocked = true;
+      emlLinks.appendChild(makeBox(
+        '#fde2e2', '#c33', '#7a1414',
+        `<strong>⚠ Cannot submit — patron sent files via link, not as attachments.</strong>` +
+        `<div style="margin-top:4px;">Open the link(s) below in a new tab, manually download the STL/3MF file, then switch to <em>"Upload STL(s)"</em> or <em>"Upload pre-sliced 3MF(s)"</em> mode and proceed normally.</div>` +
+        linkList(share)
+      ));
+    } else if (share.length) {
+      emlLinks.appendChild(makeBox(
+        '#fff4d6', '#d4a017', '#5a3d00',
+        `<strong>⚠ Email also references file-share links.</strong> ` +
+        `STL attachments were extracted, but the patron may have intended ` +
+        `additional files via these links. Verify nothing is missing:` +
+        linkList(share)
+      ));
+    }
+
+    if (other.length) {
+      emlLinks.appendChild(makeBox(
+        '#eef3f8', '#9bb', '#345',
+        `<small>${other.length} other link${other.length === 1 ? '' : 's'} in body (informational):` +
+        linkList(other) +
+        '</small>'
+      ));
+    }
+  }
 
   async function fetchAsFile(url, name) {
     const r = await fetch(url);
@@ -380,8 +442,14 @@
       emlStatus.innerHTML =
         `Parsed from <code>${escapeHtml(data.from || '(unknown sender)')}</code>. ${ollamaTag}. ` +
         `<strong>Review the table below before submitting.</strong>`;
+
+      // Surface any URLs found in the body — share-kind links are a strong
+      // signal that the patron sent files via link instead of attachment.
+      renderLinkWarnings(data.parsed.links || [], stlFiles.length > 0);
     } catch (e) {
       emlStatus.innerHTML = `<strong style="color:#c33;">Failed: ${escapeHtml(e.message)}</strong>`;
+      emlLinks.innerHTML = '';
+      emailBlocked = false;
     }
   }
 
@@ -446,6 +514,13 @@
     const slice = isSlice();
     const mode = intakeMode();
 
+    if (mode === 'email' && emailBlocked) {
+      e.preventDefault();
+      alert('This email referenced files via link only — no STL attachments. ' +
+            'Open the linked file(s) in a new tab, download manually, and ' +
+            'switch to "Upload STL(s)" mode to submit.');
+      return;
+    }
     if (slice && entries.length === 0) {
       e.preventDefault();
       alert(mode === 'email'
