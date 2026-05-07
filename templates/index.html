@@ -14,8 +14,24 @@
         <input type="radio" name="intake" value="import">
         <span>Upload pre-sliced 3MF(s)</span>
       </label>
+      <label>
+        <input type="radio" name="intake" value="email">
+        <span>From patron email (.eml)</span>
+      </label>
     </div>
   </div>
+
+  <div class="field email-only" style="display:none;">
+    <label for="eml-file">Patron email</label>
+    <input type="file" id="eml-file" accept=".eml">
+    <small>Drop the .eml here — we extract attached STLs and ask Ollama to
+    pre-fill name, card, colour, and quantity. Review the table below before
+    submitting; edit anything that's wrong.</small>
+    <div id="eml-status" style="margin-top:8px;"></div>
+  </div>
+
+  <input type="hidden" name="workdir_token" id="workdir-token" value="">
+  <input type="hidden" name="format" value="">
 
   <div class="field slice-only">
     <label for="printer">Target printer</label>
@@ -91,7 +107,17 @@
   const radios     = document.querySelectorAll('input[name="intake"]');
 
   function isSlice() {
-    return document.querySelector('input[name="intake"]:checked').value === 'slice';
+    const v = document.querySelector('input[name="intake"]:checked').value;
+    // Email mode renders the same slice-mode table; the only difference is
+    // how the entries[] array gets populated (via /intake/email instead of
+    // a manual file picker).
+    return v === 'slice' || v === 'email';
+  }
+  function isEmail() {
+    return document.querySelector('input[name="intake"]:checked').value === 'email';
+  }
+  function intakeMode() {
+    return document.querySelector('input[name="intake"]:checked').value;
   }
 
   function fmtBytes(n) {
@@ -267,18 +293,104 @@
   }
 
   function updateFlow() {
-    const slice = isSlice();
+    const mode = intakeMode();
+    const slice = isSlice();   // true for slice OR email
     document.querySelectorAll('.slice-only').forEach(el => el.style.display = slice ? '' : 'none');
-    document.querySelectorAll('.import-only').forEach(el => el.style.display = slice ? 'none' : '');
-    picker.accept   = slice ? '.stl' : '.3mf';
-    picker.multiple = true;   // both flows allow multiple
+    document.querySelectorAll('.import-only').forEach(el => el.style.display = mode === 'import' ? '' : 'none');
+    document.querySelectorAll('.email-only').forEach(el => el.style.display = mode === 'email' ? '' : 'none');
+    // Email mode hides the manual "+ Add file" button — STLs come from the .eml.
+    addBtn.style.display = mode === 'email' ? 'none' : '';
+    picker.accept   = mode === 'import' ? '.3mf' : '.stl';
+    picker.multiple = true;
     if (slice) {
       importFiles = [];
     } else {
       entries = [];
     }
+    if (mode !== 'email') {
+      // Switching out of email mode: clear any prefilled state.
+      document.getElementById('workdir-token').value = '';
+      document.getElementById('eml-status').textContent = '';
+    }
     render();
   }
+
+  // ---------------- Email-intake handler ----------------
+  // Strategy: when the user picks an .eml, we POST it to /intake/email.
+  // Server extracts the STLs into a workdir and asks Ollama for the parse.
+  // Response gives us the parsed fields + STL filenames + a workdir token.
+  // We then GET each STL back via /intake/email/file/<token>/<name> and turn
+  // them into File objects, populating the same `entries` array that the
+  // slice flow uses. From there, normal slice-mode submit takes over.
+
+  const emlInput  = document.getElementById('eml-file');
+  const emlStatus = document.getElementById('eml-status');
+  const tokenIn   = document.getElementById('workdir-token');
+
+  async function fetchAsFile(url, name) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`fetch ${name}: HTTP ${r.status}`);
+    const blob = await r.blob();
+    return new File([blob], name, { type: 'application/octet-stream' });
+  }
+
+  async function handleEmlUpload(file) {
+    emlStatus.innerHTML = '<em>Extracting + asking Ollama…</em>';
+    entries = [];
+    render();
+    try {
+      const fd = new FormData();
+      fd.append('eml', file);
+      const r = await fetch('/intake/email', { method: 'POST', body: fd });
+      if (!r.ok) {
+        const detail = await r.text();
+        throw new Error(`HTTP ${r.status}: ${detail.slice(0, 200)}`);
+      }
+      const data = await r.json();
+      tokenIn.value = data.workdir_token;
+
+      // Pre-fill customer + card
+      if (data.parsed.customer) document.getElementById('customer').value = data.parsed.customer;
+      if (data.parsed.card)     document.getElementById('card').value     = data.parsed.card;
+
+      // Per-STL color/qty are CSV; split back into arrays
+      const colors = (data.parsed.colors || '').split(',');
+      const qtys   = (data.parsed.quantity || '').split(',');
+
+      // Fetch each STL back from the host so we can re-attach to the form
+      emlStatus.innerHTML = `<em>Fetching ${data.files.length} STL file(s)…</em>`;
+      const stlFiles = await Promise.all(data.files.map(f =>
+        fetchAsFile(`/intake/email/file/${encodeURIComponent(data.workdir_token)}/${encodeURIComponent(f.name)}`, f.name)
+      ));
+
+      // Build the entries[] array the slice flow expects
+      stlFiles.forEach((file, i) => {
+        entries.push({
+          file: file,
+          qty: parseInt(qtys[i] || '1', 10) || 1,
+          color: (colors[i] || '').trim(),
+          scale: 1.0,
+        });
+      });
+      render();
+
+      const ollamaTag = data.parsed.ollama_used
+        ? '<strong style="color:#2a7;">Ollama: parsed</strong>'
+        : '<strong style="color:#a52;">Ollama unreachable — regex fallback only</strong>';
+      emlStatus.innerHTML =
+        `Parsed from <code>${escapeHtml(data.from || '(unknown sender)')}</code>. ${ollamaTag}. ` +
+        `<strong>Review the table below before submitting.</strong>`;
+    } catch (e) {
+      emlStatus.innerHTML = `<strong style="color:#c33;">Failed: ${escapeHtml(e.message)}</strong>`;
+    }
+  }
+
+  emlInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (f) handleEmlUpload(f);
+    emlInput.value = '';   // allow re-selecting the same file
+  });
+  // ---------------- end email handler ----------------
 
   async function inspect3mf(f) {
     const fe = {file: f, plates: [], inspecting: true};
@@ -332,15 +444,25 @@
 
   form.addEventListener('submit', (e) => {
     const slice = isSlice();
+    const mode = intakeMode();
 
     if (slice && entries.length === 0) {
-      e.preventDefault(); alert('Add at least one STL.'); return;
+      e.preventDefault();
+      alert(mode === 'email'
+        ? 'Drop an .eml file first; we need the STLs and parsed fields.'
+        : 'Add at least one STL.');
+      return;
     }
     if (!slice && importFiles.length === 0) {
       e.preventDefault(); alert('Add at least one 3MF.'); return;
     }
     if (!slice && importFiles.some(fe => fe.inspecting)) {
       e.preventDefault(); alert('Still inspecting one of the 3MFs — wait a moment.'); return;
+    }
+    // Email mode is a smart pre-fill of slice mode — backend only knows
+    // slice/import, so swap the intake radio before submit.
+    if (mode === 'email') {
+      document.querySelector('input[name="intake"][value="slice"]').checked = true;
     }
 
     if (slice) {

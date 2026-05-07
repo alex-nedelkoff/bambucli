@@ -39,6 +39,7 @@ from slice_order import (  # noqa: E402
     _merge_3mfs, _make_printable, _strip_to_print_file,
     PRINTERS, DEFAULT_PRINTER,
 )
+from email_parser import parse_email  # noqa: E402
 WORK_DIR = BASE_DIR / "printqueue" / "work"
 LEDGER_JSON = BASE_DIR / "printqueue" / "orders.json"
 SLICE_ORDER = BASE_DIR / "slice_order.py"
@@ -262,6 +263,84 @@ async def inspect_3mf_endpoint(file: UploadFile = File(...)) -> dict:
             "objects": [o.get("name", "") for o in p.get("objects", [])],
         })
     return {"plates": plates}
+
+
+@app.post("/intake/email")
+async def intake_email(eml: UploadFile = File(...)) -> JSONResponse:
+    """Parse a patron .eml: extract STL attachments + body, ask Ollama to
+    structure the prose. Returns form-ready field values that the index
+    page's slice tab pre-fills with. The STLs land in a workdir under
+    `printqueue/work/`; the client follows up with GETs to
+    `/intake/email/file/<workdir>/<filename>` to re-attach them to the
+    eventual /submit POST.
+    """
+    if not eml.filename or not eml.filename.lower().endswith(".eml"):
+        raise HTTPException(400, "expected a .eml file")
+
+    # Stash the upload in a temp file so cmd_extract can open it by path.
+    import os, tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".eml")
+    try:
+        os.close(fd)
+        Path(tmp).write_bytes(await eml.read())
+        extracted = _run(["python3", str(SLICE_ORDER), "extract", tmp])
+    finally:
+        try:
+            Path(tmp).unlink()
+        except OSError:
+            pass
+
+    workdir = Path(extracted["workdir"])
+    body = extracted.get("body", "") or ""
+    stls: list[str] = extracted.get("stls", []) or []
+    from_header = extracted.get("from", "") or ""
+
+    parsed = parse_email(body, stls, from_header)
+
+    # Workdir token = just the directory name (already unique per intake).
+    # We re-validate it on the file-fetch endpoint so a malicious client
+    # can't traverse out of WORK_DIR.
+    workdir_token = workdir.name
+
+    # Compute file sizes for the UI's table preview.
+    files_info = []
+    for s in stls:
+        path = workdir / s
+        files_info.append({
+            "name": s,
+            "size": path.stat().st_size if path.exists() else 0,
+        })
+
+    return JSONResponse({
+        "workdir_token": workdir_token,
+        "from": from_header,
+        "subject": extracted.get("subject", ""),
+        "body": body.strip(),
+        "files": files_info,
+        "parsed": parsed,
+    })
+
+
+@app.get("/intake/email/file/{workdir_token}/{filename}")
+async def intake_email_file(workdir_token: str, filename: str) -> FileResponse:
+    """Serve an STL file extracted by /intake/email back to the client so
+    JS can re-attach it to the /submit multipart upload."""
+    # Defensive: refuse anything that tries to traverse, and pin the path
+    # under WORK_DIR so a crafted token can't escape.
+    if "/" in workdir_token or ".." in workdir_token:
+        raise HTTPException(400, "bad workdir token")
+    if "/" in filename or ".." in filename or not filename.lower().endswith(".stl"):
+        raise HTTPException(400, "bad filename")
+    path = (WORK_DIR / workdir_token / filename).resolve()
+    if not str(path).startswith(str(WORK_DIR.resolve())):
+        raise HTTPException(400, "path escapes workdir")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, f"{filename} not found")
+    return FileResponse(
+        path,
+        media_type="application/octet-stream",
+        filename=filename,
+    )
 
 
 def _build_record(
