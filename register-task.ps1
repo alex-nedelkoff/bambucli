@@ -8,16 +8,22 @@ $repo = $PSScriptRoot
 $taskName = "BambuCLI uvicorn"
 
 Write-Host "Stopping any existing process on TCP 8000..."
-# netstat + taskkill — more reliable than Get-NetTCPConnection +
-# Stop-Process when the listener is owned by SYSTEM and the calling
-# session has a quirky token. taskkill /F also kills SYSTEM-owned
-# processes when invoked from an elevated shell.
-$listenerPids = netstat -ano -p TCP | Select-String ":8000\s.*LISTENING" | ForEach-Object {
-    ($_.ToString() -split '\s+' | Where-Object { $_ -match '^\d+$' })[-1]
-} | Select-Object -Unique
-foreach ($listenerPid in $listenerPids) {
-    Write-Host "  Stopping PID $listenerPid"
-    & taskkill /F /PID $listenerPid 2>&1 | Write-Host
+# netstat + taskkill is more reliable than Get-NetTCPConnection +
+# Stop-Process when the listener is owned by SYSTEM. We parse only
+# IPv4 lines via a strict regex (the IPv6 [::] listener can show as
+# a kernel pseudo-PID like 6 that taskkill refuses to touch). We
+# discard taskkill's stderr to $null instead of piping through
+# PowerShell so a "not found" doesn't abort the script under
+# $ErrorActionPreference = Stop.
+foreach ($line in (netstat -ano -p TCP)) {
+    if ($line -match '^\s*TCP\s+\d+\.\d+\.\d+\.\d+:8000\s+\S+\s+LISTENING\s+(\d+)') {
+        $listenerPid = [int]$Matches[1]
+        Write-Host "  Stopping PID $listenerPid"
+        & taskkill /F /PID $listenerPid 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    (taskkill exit $LASTEXITCODE; skipping)"
+        }
+    }
 }
 Start-Sleep -Seconds 2
 
