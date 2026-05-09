@@ -8,12 +8,18 @@ $repo = $PSScriptRoot
 $taskName = "BambuCLI uvicorn"
 
 Write-Host "Stopping any existing process on TCP 8000..."
-$conns = Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue
-foreach ($c in $conns) {
-    Write-Host "  Stopping PID $($c.OwningProcess)"
-    Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue
+# netstat + taskkill — more reliable than Get-NetTCPConnection +
+# Stop-Process when the listener is owned by SYSTEM and the calling
+# session has a quirky token. taskkill /F also kills SYSTEM-owned
+# processes when invoked from an elevated shell.
+$listenerPids = netstat -ano -p TCP | Select-String ":8000\s.*LISTENING" | ForEach-Object {
+    ($_.ToString() -split '\s+' | Where-Object { $_ -match '^\d+$' })[-1]
+} | Select-Object -Unique
+foreach ($listenerPid in $listenerPids) {
+    Write-Host "  Stopping PID $listenerPid"
+    & taskkill /F /PID $listenerPid 2>&1 | Write-Host
 }
-Start-Sleep -Seconds 1
+Start-Sleep -Seconds 2
 
 Write-Host "Removing existing task if present..."
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue

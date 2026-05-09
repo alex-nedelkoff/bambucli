@@ -98,7 +98,7 @@ def _slice(workdir: Path, customer: str, color: str,
            stls: list[str], clones: list[int], scale: float,
            printer: str = DEFAULT_PRINTER) -> dict:
     cmd = [
-        "python3", str(SLICE_ORDER), "slice",
+        sys.executable, str(SLICE_ORDER), "slice",
         "--workdir", str(workdir),
         "--customer", customer,
         "--color", color,
@@ -112,12 +112,12 @@ def _slice(workdir: Path, customer: str, color: str,
 
 
 def _inspect(path: Path) -> dict:
-    return _run(["python3", str(SLICE_ORDER), "inspect", str(path)])
+    return _run([sys.executable, str(SLICE_ORDER), "inspect", str(path)])
 
 
 def _send_receipt(path: Path, customer: str, card: str, colors: str) -> dict:
     return _run([
-        "python3", str(SLICE_ORDER), "receipt", str(path),
+        sys.executable, str(SLICE_ORDER), "receipt", str(path),
         "--customer", customer, "--card", card, "--color", colors,
         "--send",
     ])
@@ -283,7 +283,7 @@ async def intake_email(eml: UploadFile = File(...)) -> JSONResponse:
     try:
         os.close(fd)
         Path(tmp).write_bytes(await eml.read())
-        extracted = _run(["python3", str(SLICE_ORDER), "extract", tmp])
+        extracted = _run([sys.executable, str(SLICE_ORDER), "extract", tmp])
     finally:
         try:
             Path(tmp).unlink()
