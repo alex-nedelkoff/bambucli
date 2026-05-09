@@ -94,7 +94,7 @@ def scan_links(body: str) -> list[dict]:
 
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3.2:3b"
+OLLAMA_MODEL = "llama3.2:1b"
 OLLAMA_TIMEOUT_S = 30
 
 # Ajax library cards are 14 digits. Allow patron-typed separators (space,
@@ -116,7 +116,13 @@ def regex_card(body: str) -> str | None:
 
 def _ollama_call(body: str, stl_names: list[str], from_header: str) -> dict:
     """Single-shot call to Ollama with format=json. Returns parsed dict on
-    success, empty dict on any failure (network, parse, model misbehaviour)."""
+    success, empty dict on any failure (network, parse, model misbehaviour).
+
+    Prompt shape is tuned for 1B-class models. Critical guard: the JSON
+    template uses empty-string placeholders, NOT angle-bracket descriptors
+    like "<patron full name>". Small models tend to literally echo such
+    descriptors as the answer.
+    """
     stl_list = "\n".join(f"  - {n}" for n in stl_names) or "  (none)"
     prompt = (
         "You are parsing a 3D-print order email from a public-library patron.\n"
@@ -126,30 +132,35 @@ def _ollama_call(body: str, stl_names: list[str], from_header: str) -> dict:
         "Email body:\n\"\"\"\n"
         f"{body.strip()}\n"
         "\"\"\"\n\n"
-        "Return ONLY valid JSON in exactly this shape:\n"
-        "{\n"
-        '  "customer": "<patron full name>",\n'
-        '  "card": "<14-digit library card, digits only>",\n'
-        '  "stl_assignments": [\n'
-        '    {"filename": "<exact STL filename from list above>",\n'
-        '     "color": "<one of: Red, Blue, Black, White, Grey, Green, Yellow, '
-        'Orange, Purple, Pink, Brown, Beige, Clear, Gold, Silver>",\n'
-        '     "quantity": <integer>}\n'
-        "  ]\n"
-        "}\n\n"
+        "Return ONLY valid JSON with these exact keys:\n"
+        "  customer        - the patron's full name from the email (string)\n"
+        "  card            - their 14-digit library card, digits only (string)\n"
+        "  stl_assignments - list of {filename, color, quantity}, one per "
+        "attached STL above\n"
+        "\n"
+        "Empty JSON shape (fill in real values from the email):\n"
+        '{"customer": "", "card": "", "stl_assignments": '
+        '[{"filename": "", "color": "", "quantity": 1}]}\n'
+        "\n"
         "Rules:\n"
-        "- Use the EXACT STL filenames from the attached list. Do not invent.\n"
+        "- Use the EXACT STL filenames from the attached list above. Do not invent.\n"
+        "- color must be one of: Red, Blue, Black, White, Grey, Green, Yellow, "
+        "Orange, Purple, Pink, Brown, Beige, Clear, Gold, Silver.\n"
         "- Map fuzzy colour words generously: 'dark red' -> Red, 'navy' -> Blue,\n"
         "  'forest green' -> Green, 'charcoal' -> Black.\n"
         "- If one colour is mentioned for the whole order, apply it to every STL.\n"
         "- If a quantity isn't specified per file, default to 1.\n"
-        "- If a field can't be determined, leave it as an empty string or 0.\n"
+        "- If a field can't be determined, use empty string \"\" or 0.\n"
     )
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
         "format": "json",
+        # Temperature 0 (greedy decoding) — for structured extraction we want
+        # deterministic output, not creative variation. On 1B-class models
+        # this sharply reduces hallucinations like 'purple' parsing as Black.
+        "options": {"temperature": 0},
     }
     try:
         req = urllib.request.Request(
