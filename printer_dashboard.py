@@ -119,6 +119,18 @@ class PrinterClient:
         self.serial: str = cfg["serial"]
         self.report_topic = f"device/{self.serial}/report"
         self.request_topic = f"device/{self.serial}/request"
+        # P1S firmware (01.10 confirmed) kicks any client that subscribes
+        # to /request — the topic for commands sent TO the printer — with
+        # rc=Unspecified Error within ~50ms, then loops forever as paho
+        # reconnects. X1C firmware allows it. Subscription to /request is
+        # only needed for filename eavesdropping on prints initiated from
+        # Studio / Handy / cloud; on P1S we skip it and rely on what the
+        # printer voluntarily publishes in /report (which DOES include
+        # subtask_name for non-SD prints there).
+        self.eavesdrop_request: bool = cfg.get(
+            "eavesdrop_request",
+            not str(cfg.get("model", "")).upper().startswith("P1"),
+        )
         self.state: dict = {
             "id": self.id,
             "label": cfg.get("label", self.id),
@@ -144,6 +156,7 @@ class PrinterClient:
         }
         self._client: mqtt.Client | None = None
         self._snapshot_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
 
     def start(self) -> None:
         c = mqtt.Client(
@@ -167,9 +180,11 @@ class PrinterClient:
             self._set_error(f"connect failed: {e}")
 
     def stop(self) -> None:
-        if self._snapshot_task is not None:
-            self._snapshot_task.cancel()
-            self._snapshot_task = None
+        for task_attr in ("_snapshot_task", "_reconnect_task"):
+            t = getattr(self, task_attr)
+            if t is not None:
+                t.cancel()
+                setattr(self, task_attr, None)
         if self._client is None:
             return
         try:
@@ -177,6 +192,37 @@ class PrinterClient:
             self._client.disconnect()
         except Exception:
             pass
+
+    async def _reconnect_watchdog(self) -> None:
+        """Force a reconnect when paho's own retry loop won't.
+
+        paho's `reconnect_delay_set` only handles network-level failures.
+        For broker-initiated DISCONNECTs (Bambu kicking our session when
+        Bambu Studio claims the single MQTT slot, firmware reboots,
+        etc.) paho gives up and the connection sits dead. This task
+        polls the cached state every 30s and forces `client.reconnect()`
+        whenever we've been offline too long. The reconnect call is
+        thread-safe in paho v2 and returns immediately — actual TLS
+        handshake happens on the loop thread."""
+        import time as _time
+        STUCK_AFTER_SEC = 45
+        while True:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            if self._client is None or self.state.get("online"):
+                continue
+            disc_at = self.state.get("disconnected_at")
+            if not disc_at or _time.time() - disc_at < STUCK_AFTER_SEC:
+                continue
+            try:
+                self._client.reconnect()
+            except Exception as e:
+                # Not fatal — we'll try again on the next tick. Log via
+                # state so the UI shows the most recent attempt's error
+                # if we stay stuck for a long time.
+                self._set_error(f"reconnect: {e}"[:200])
 
     async def _snapshot_loop(self) -> None:
         """Pull one camera frame every SNAPSHOT_INTERVAL_SEC. Errors don't
@@ -217,10 +263,11 @@ class PrinterClient:
         client.subscribe(self.report_topic, qos=0)
         # Also eavesdrop on commands sent TO the printer (Bambu Studio's
         # Send-to-Printer, Handy, anything else on the LAN) so we can capture
-        # the filename in "project_file" commands. Bambu's broker is a plain
-        # mosquitto with no ACLs — anyone holding the access code can read
-        # both topics.
-        client.subscribe(self.request_topic, qos=0)
+        # the filename in "project_file" commands. X1C firmware allows this;
+        # P1S firmware refuses and disconnects us — see eavesdrop_request
+        # default in __init__.
+        if self.eavesdrop_request:
+            client.subscribe(self.request_topic, qos=0)
         # Ask the printer to push its full current state right now; otherwise
         # we'd only receive deltas as values change and the dashboard would
         # be blank until the next slice/temp tick.
@@ -331,6 +378,7 @@ class DashboardHub:
             self.clients[client.id] = client
             client.start()
             client._snapshot_task = loop.create_task(client._snapshot_loop())
+            client._reconnect_task = loop.create_task(client._reconnect_watchdog())
 
     def stop(self) -> None:
         for c in self.clients.values():

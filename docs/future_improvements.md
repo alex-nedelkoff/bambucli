@@ -96,6 +96,24 @@ specific item as paid work) lives in the gitignored sibling docs, not here.
     we hit it every 60s and surface the error; could back off to 5min
     after N failures. Particularly relevant for the P1S given the
     above; right now it noisily errors every minute.
+  - **P1-series `/request` subscribe heuristic may break on future
+    firmware.** P1S firmware 01.10 kicks any client subscribing to
+    `device/<serial>/request` (DISCONNECT rc=Unspecified Error within
+    ~50ms, paho reconnects, infinite ping-pong). Workaround in
+    `PrinterClient.__init__`: skip the subscription whenever
+    `cfg["model"]` starts with "P1". Risks:
+    - Bambu loosens the policy on a later P1 firmware → we'd silently
+      forgo filename eavesdropping on P1 prints we could have caught.
+      Low cost; symptom is "P1 SD prints show 'no filename sent'".
+    - Bambu tightens the policy on an X1 firmware update → X1Cs would
+      start kick-looping just like P1S did. Symptom: tile shows
+      "reconnecting…" indefinitely. Diagnostic: re-run the mimic-service
+      probe in `printer_dashboard.py` history (subscribe to `/report`
+      vs `/report+/request`, time the disconnect).
+    - Override exists per-printer via `"eavesdrop_request": true|false`
+      in `printers.json`. Could promote to runtime auto-detect (try
+      `/request` subscribe, observe whether we're disconnected within
+      1s, persist the verdict) if firmware behavior turns out to flap.
   - Tighter kiosk mode (drop the global header/nav for `/dashboard`,
     add Edge auto-launch on boot) — currently a shared template.
   - Per-printer "current order" overlay once filename matching works
