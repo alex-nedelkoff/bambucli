@@ -29,8 +29,12 @@ BASE_DIR = Path(__file__).resolve().parent
 # Using OrcaSlicer (BambuStudio fork) because BambuStudio 02.04.00.70's CLI
 # segfaults on X1C slice operations — even with its own bundled profiles —
 # due to a missing cli_config.json machine_limits entry for X1 Carbon.
-SLICER_CLI = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-ORCA_BUNDLE = Path("/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL")
+if sys.platform == "win32":
+    SLICER_CLI = Path(r"C:\Program Files\OrcaSlicer\orca-slicer.exe")
+    ORCA_BUNDLE = Path(r"C:\Program Files\OrcaSlicer\resources\profiles\BBL")
+else:
+    SLICER_CLI = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+    ORCA_BUNDLE = Path("/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL")
 PRINT_QUEUE = BASE_DIR / "printqueue"
 WORK_DIR = PRINT_QUEUE / "work"
 PROCESS_OVERLAY = BASE_DIR / "process_cli.json"
@@ -1543,29 +1547,43 @@ def _send_to_tm_t88v(
 
     Deps: `pip3 install python-escpos pyusb` + `brew install libusb`.
     """
-    # pyusb's libusb1 backend looks for libusb via the system linker; on macOS
-    # Homebrew installs it to /opt/homebrew/lib which isn't on DYLD by default.
-    # Prepend it so the import finds the bottle without needing a shell wrapper.
+    # pyusb's libusb1 backend needs libusb-1.0 findable by the OS linker.
     import os
-    brew_lib = "/opt/homebrew/lib"
-    if os.path.isdir(brew_lib):
-        existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
-        if brew_lib not in existing.split(":"):
-            os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = (
-                f"{brew_lib}:{existing}" if existing else brew_lib
-            )
+    _pyusb_backend = None
+    if sys.platform == "darwin":
+        # Homebrew puts it at /opt/homebrew/lib, which isn't on DYLD by default.
+        brew_lib = "/opt/homebrew/lib"
+        if os.path.isdir(brew_lib):
+            existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+            if brew_lib not in existing.split(":"):
+                os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = (
+                    f"{brew_lib}:{existing}" if existing else brew_lib
+                )
+    elif sys.platform == "win32":
+        # libusb-package ships libusb-1.0.dll and a backend factory that loads
+        # it explicitly — ctypes.util.find_library() can't find DLLs added via
+        # os.add_dll_directory(), so the explicit backend is required here.
+        try:
+            import libusb_package
+            _pyusb_backend = libusb_package.get_libusb1_backend()
+        except ImportError:
+            fail("libusb-package not installed. Run: pip install libusb-package")
 
     try:
         from escpos.printer import Usb
     except ImportError:
-        fail("python-escpos not installed. Run: pip3 install python-escpos pyusb")
+        fail("python-escpos not installed. Run: pip install python-escpos pyusb")
 
     # Epson vendor ID; TM-T88V default USB product ID. If a future Epson model
-    # is used, check with `system_profiler SPUSBDataType` on macOS for its IDs.
+    # is used, check with `system_profiler SPUSBDataType` on macOS, or Device
+    # Manager / `Get-PnpDevice -Class USB` on Windows, for its IDs.
     EPSON_VID = 0x04B8
     TM_T88V_PID = 0x0202
     try:
-        p = Usb(EPSON_VID, TM_T88V_PID, timeout=0, profile="TM-T88V")
+        usb_args = {"idVendor": EPSON_VID, "idProduct": TM_T88V_PID}
+        if _pyusb_backend is not None:
+            usb_args["backend"] = _pyusb_backend
+        p = Usb(usb_args=usb_args, timeout=0, profile="TM-T88V")
     except Exception as e:
         fail(f"could not open USB printer (VID=0x{EPSON_VID:04X} PID=0x{TM_T88V_PID:04X}): {e}")
 

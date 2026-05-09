@@ -1,6 +1,7 @@
 # Patron data — MUST NOT be committed.
 # Contains library card numbers, email bodies, full names. MFIPPA-protected.
 printqueue/
+orders*.csv
 
 # Runtime cache (merged profile JSONs regenerated on each slice)
 .cache/
