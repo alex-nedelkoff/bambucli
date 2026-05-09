@@ -25,6 +25,20 @@ from email import policy
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+def _fmt_date_dom(d: datetime) -> str:
+    """Cross-platform replacement for strftime('%b %-d'), e.g. 'Apr 5'.
+    Windows' strftime does not support glibc's %-d 'no leading zero' flag,
+    so we compose the day component manually."""
+    return f"{d:%b} {d.day}"
+
+
+def _fmt_receipt_dt(d: datetime) -> str:
+    """Cross-platform replacement for strftime('%b %-d, %Y  %-I:%M %p'),
+    e.g. 'Apr 5, 2026  3:45 PM'. Same %-d / %-I portability story as above."""
+    h = d.hour % 12 or 12
+    return f"{d:%b} {d.day}, {d.year}  {h}:{d:%M %p}"
+
+
 BASE_DIR = Path(__file__).resolve().parent
 # Using OrcaSlicer (BambuStudio fork) because BambuStudio 02.04.00.70's CLI
 # segfaults on X1C slice operations — even with its own bundled profiles —
@@ -629,7 +643,7 @@ def cmd_slice(args) -> None:
     # sum — the 3MF itself contains one plate per piece.
     first_name_raw = args.customer.strip().split()[0] if args.customer.strip() else "Unknown"
     first_name = sanitize(first_name_raw)
-    today = datetime.now().strftime("%b %-d")
+    today = _fmt_date_dom(datetime.now())
 
     _make_printable(
         staged_3mf,
@@ -1480,7 +1494,7 @@ def _render_receipt_text(
     lines.append(customer.upper().center(w))
     lines.append("")
     lines.append(f"  Card:  {_format_card(card)}")
-    lines.append(f"  Date:  {when.strftime('%b %-d, %Y  %-I:%M %p')}")
+    lines.append(f"  Date:  {_fmt_receipt_dt(when)}")
     lines.append(f"  Needs waiver signed             [ ]")
     lines.append(thin)
 
@@ -1605,7 +1619,7 @@ def _send_to_tm_t88v(
     p.text("\n")
 
     p.text(f"  Card:  {_format_card(card)}\n")
-    p.text(f"  Date:  {when.strftime('%b %-d, %Y  %-I:%M %p')}\n")
+    p.text(f"  Date:  {_fmt_receipt_dt(when)}\n")
     p.text(f"  Needs waiver signed             [ ]\n")
     p.text(thin + "\n")
 

@@ -39,7 +39,7 @@ sys.path.insert(0, str(BASE_DIR))
 # in-process; subprocess remains the path for the standard slice/inspect/receipt
 # calls so each invocation gets a fresh interpreter.
 from slice_order import (  # noqa: E402
-    _merge_3mfs, _make_printable, _strip_to_print_file,
+    _fmt_date_dom, _merge_3mfs, _make_printable, _strip_to_print_file,
     PRINTERS, DEFAULT_PRINTER,
 )
 from email_parser import OLLAMA_MODEL, OLLAMA_URL, parse_email  # noqa: E402
@@ -423,7 +423,7 @@ def _build_record(
 
 def _convention_filename(customer: str, total_g: float, total_s: int, when: datetime) -> str:
     first = _sanitize(customer.strip().split()[0] if customer.strip() else "unknown")
-    today = when.strftime("%b %-d")
+    today = _fmt_date_dom(when)
     h, rem = divmod(int(total_s), 3600)
     mins = rem // 60
     return f"{first}_{today}_{total_g:.1f}g_{h}h{mins:02d}m.3mf"
@@ -583,7 +583,7 @@ async def submit(
                 for i, p in enumerate(mplates)
             ]
             first_name_raw = customer.strip().split()[0] if customer.strip() else "Unknown"
-            today_label = when.strftime("%b %-d")
+            today_label = _fmt_date_dom(when)
             _make_printable(
                 tmp_merged,
                 customer_first=first_name_raw,
