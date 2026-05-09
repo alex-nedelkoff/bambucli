@@ -16,6 +16,23 @@ CSV_PATH = REPO / "orders.csv"
 LEDGER = REPO / "printqueue" / "orders.json"
 
 
+import re as _re
+_TIME_LABEL_RE = _re.compile(r"^(?:(\d+)h)?(\d+)m$")
+
+
+def parse_time_label(label: str) -> int:
+    """Reverse of app._fmt_time. '1h11m' -> 4260, '47m' -> 2820, '0h12m' -> 720.
+    Returns 0 on empty / unrecognised input."""
+    if not label:
+        return 0
+    m = _TIME_LABEL_RE.match(label.strip())
+    if not m:
+        return 0
+    h = int(m.group(1) or 0)
+    mins = int(m.group(2))
+    return h * 3600 + mins * 60
+
+
 def csv_to_record(row: dict) -> dict:
     def f(s: str) -> float:
         return float(s) if s.strip() else 0.0
@@ -23,6 +40,7 @@ def csv_to_record(row: dict) -> dict:
     def i(s: str) -> int:
         return int(s) if s.strip() else 0
 
+    label = row["Total Time"]
     return {
         "timestamp": row["Timestamp"],
         "customer": row["Customer"],
@@ -32,7 +50,10 @@ def csv_to_record(row: dict) -> dict:
         "filename": row["Output File"],
         "plate_count": i(row["Plates"]),
         "total_grams": f(row["Total Grams"]),
-        "total_time_label": row["Total Time"],
+        "total_time_label": label,
+        # Parsed-back seconds for /history's aggregate. Without this, rows
+        # imported from CSV-only history contribute 0 to the time total.
+        "total_time_seconds": parse_time_label(label),
         "price_cad": f(row["Price (CAD)"]),
         "colors": [c.strip() for c in row["Colours"].split(",") if c.strip()],
     }
