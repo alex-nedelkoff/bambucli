@@ -39,7 +39,7 @@ if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
 
 Write-Host "Installing service via NSSM..."
 & $nssmExe install $serviceName $ollamaExe serve
-& $nssmExe set $serviceName AppEnvironmentExtra "OLLAMA_MODELS=$modelsDir"
+& $nssmExe set $serviceName AppEnvironmentExtra "OLLAMA_MODELS=$modelsDir" "OLLAMA_KEEP_ALIVE=24h"
 & $nssmExe set $serviceName AppStdout         "$logDir\ollama.out.log"
 & $nssmExe set $serviceName AppStderr         "$logDir\ollama.err.log"
 & $nssmExe set $serviceName AppRotateFiles    1

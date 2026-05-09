@@ -15,6 +15,7 @@ Or, via the LaunchDaemon recipe in SETUP.md, at boot.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -22,6 +23,8 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.request
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -39,13 +42,43 @@ from slice_order import (  # noqa: E402
     _merge_3mfs, _make_printable, _strip_to_print_file,
     PRINTERS, DEFAULT_PRINTER,
 )
-from email_parser import parse_email  # noqa: E402
+from email_parser import OLLAMA_MODEL, OLLAMA_URL, parse_email  # noqa: E402
 WORK_DIR = BASE_DIR / "printqueue" / "work"
 LEDGER_JSON = BASE_DIR / "printqueue" / "orders.json"
 SLICE_ORDER = BASE_DIR / "slice_order.py"
 PRICE_PER_GRAM = 0.05  # CAD
 
-app = FastAPI(title="Makerspace Print Intake")
+async def _warm_ollama() -> None:
+    """Background pre-warm: ask Ollama to load the email-parser model
+    into memory so the first patron-email parse doesn't pay the cold
+    model-load cost (~6s on this CPU). Uses keep_alive=24h so the model
+    stays resident across idle gaps. Best-effort; if the daemon isn't
+    reachable yet, we silently skip and the first parse_email() call
+    pays the load."""
+    def _fire() -> None:
+        body = json.dumps({
+            "model": OLLAMA_MODEL,
+            "prompt": "ok",
+            "stream": False,
+            "keep_alive": "24h",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            OLLAMA_URL, data=body, headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=120).read()
+    try:
+        await asyncio.to_thread(_fire)
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    asyncio.create_task(_warm_ollama())
+    yield
+
+
+app = FastAPI(title="Makerspace Print Intake", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
