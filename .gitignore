@@ -3,6 +3,12 @@
 printqueue/
 orders*.csv
 
+# Per-printer LAN access codes — printer-local secrets, don't commit.
+printers.json
+
+# Live camera snapshots (overwritten every minute by printer_dashboard).
+snapshots/
+
 # Runtime cache (merged profile JSONs regenerated on each slice)
 .cache/
 

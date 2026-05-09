@@ -45,59 +45,112 @@ specific item as paid work) lives in the gitignored sibling docs, not here.
 
 ---
 
-### Printer status monitoring (idea)
+### Printer status monitoring (shipped, follow-ups remain)
 
-- **Status:** idea, not yet scoped in detail
-- **Why:** Staff currently has to walk to the makerspace floor to check
-  whether a printer is busy, what's printing, how long is left, and whether
-  it's errored. From a desk monitor, all of that is invisible. Adding
-  real-time status would mean staff can plan the next print, talk to
-  patrons about wait times, and see error states without leaving the desk.
-- **What:** A new `/printers` page (or panel on existing `/history`) that
-  shows live state for each registered printer:
-  - Connected / disconnected
-  - Idle / printing / paused / error
-  - Current job filename + estimated time remaining
-  - Hotend + bed temps
-  - Layer progress (current / total)
-  - AMS state (slot temps, filament present per slot, filament colors)
-  - Error/warning messages from the firmware (the same messages we've been
-    chasing as "throttle reasons")
-- **How it works:**
-  - Bambu printers in **LAN-only mode** expose MQTT on port 8883 (TLS) with
-    real-time telemetry. Subscribe to `device/<serial>/report` and the
-    printer pushes state updates as JSON.
-  - Each printer needs: local IP, 8-digit access code (from touchscreen),
-    serial number. Stored in a config file (`printers.json`?) or env vars.
-  - Backend service runs as a long-lived async task in the FastAPI app,
-    maintaining MQTT connections per printer + caching the latest status.
-  - Frontend polls `/printers/status` (or uses Server-Sent Events for live
-    updates) to render the panel.
-- **Scope:**
-  - Library evaluation: `bambulabs_api` and `pybambu` exist; pick one or
-    write a thin direct-MQTT client. ~2 hrs to evaluate.
-  - Printer config storage + admin page to add/edit printers: ~3 hrs.
-  - MQTT background task with reconnect logic: ~4 hrs.
-  - Status JSON endpoint + polling/SSE: ~2 hrs.
-  - Frontend panel + CSS: ~3 hrs.
-  - Testing on actual printers: ~2 hrs.
-  - **Total: ~16 hours** for a basic but production-ready monitor.
-- **Dependencies / risks:**
-  - **Each printer must be in LAN-only mode** — set on the touchscreen.
-    Default is cloud mode. One-time per printer.
-  - **Access codes can rotate** if someone factory-resets the printer or
-    changes the LAN setting. We need a clear "reconfigure this printer"
-    UX or staff has to edit the config file by hand.
-  - **WiFi blips break MQTT.** Reconnect logic is essential or the panel
-    will silently freeze.
-  - **Not Tailscale-routed by default.** The printer talks to other devices
-    on its physical LAN. The host iMac (also on the same LAN) is the right
-    place to run this — Pickering printers would need their own Pickering
-    host. Don't try to route MQTT over Tailscale.
-- **Why this first** (vs auto-send): zero write actions to the printer, so
-  the failure modes are limited to "panel shows wrong info" rather than
-  "wrong file got printed on wrong printer." Lets us learn the protocol
-  + reliability characteristics before trusting it for anything destructive.
+- **Status:** initial cut shipped
+- **Shipped:** `printer_dashboard.py` + `templates/dashboard.html` +
+  `printers.json` config + `/dashboard` kiosk page. Per-printer paho-mqtt
+  client over TLS:8883 maintains a persistent connection, deep-merges
+  delta reports into a cached state, fans out to the page over a
+  WebSocket. Tile shows gcode_state, % + bar, time left, layer,
+  nozzle/bed/chamber temps (chamber falls back to `device.ctc.info.temp`),
+  AMS slot/filament/colour, plus a 60s-cadence webcam frame pulled via
+  RTSPS:322 through bundled ffmpeg (`imageio-ffmpeg`).
+- **Critical correction to earlier assumptions:**
+  - Cloud mode + Handy keep working — printers do NOT need to be in
+    LAN-only mode for MQTT or for the camera. Camera does need
+    "LAN Mode Liveview" toggled on (Settings → General on X1C); when it's
+    on, `print.ipcam.rtsp_url` flips from `"disable"` to a `rtsps://...`
+    URL — that's how to verify without trial-and-error.
+  - Camera protocol changed in current firmware: the legacy port-6000
+    custom-protocol path is gated behind full LAN-Only Mode and would
+    break Handy. Modern firmware exposes RTSPS on port 322 with H264;
+    that's what we use. Don't reintroduce the port-6000 path without
+    re-checking firmware behavior.
+  - `paho-mqtt` + a thin direct client beat both `bambulabs_api` and
+    `pybambu` for our case — both libraries just read the same MQTT
+    fields, with extra abstractions we didn't want. We do exactly the
+    deep-merge + WebSocket fanout we need in ~250 lines.
+- **Open follow-ups:**
+  - Filename matching for SD-touchscreen-initiated prints — see next entry.
+  - "Send to Printer" replacing the SD-card sneakernet — gives us
+    `subtask_name` for free + automation; see existing auto-send entry.
+  - **P1S camera (LAN-direct) — not currently working.** P1S firmware
+    01.10.00.00 (latest as of mid-2026) does not surface a LAN Mode
+    Liveview toggle anywhere obvious in Settings — toggle was added in
+    01.05.06 per Bambu's release notes but staff couldn't find it on
+    01.10. Effects: `print.ipcam.rtsp_url` is absent from MQTT (vs
+    `"disable"` when the toggle exists but is off — useful diagnostic),
+    so the dashboard's RTSPS path can't connect. Bambu Studio still
+    shows the camera because Studio falls back to cloud-relay when
+    LAN-direct isn't available — don't take a working Studio preview as
+    proof Liveview is on. Options: (a) walk through every settings
+    submenu carefully looking for "LAN" or "Liveview" wording variants,
+    (b) ask Bambu support for the exact menu path on 01.10, (c) add a
+    cloud-relay fallback to our snapshot grabber (needs Bambu cloud
+    auth tokens — significant scope, breaks the "all-LAN" model), or
+    (d) accept no P1S camera until Bambu re-exposes the toggle. The
+    X1Cs (P2, P3) work fine on the same firmware family, so this is
+    P1S-firmware-specific, not a dashboard bug.
+  - Camera retry / cooldown when LAN Mode Liveview is off — currently
+    we hit it every 60s and surface the error; could back off to 5min
+    after N failures. Particularly relevant for the P1S given the
+    above; right now it noisily errors every minute.
+  - Tighter kiosk mode (drop the global header/nav for `/dashboard`,
+    add Edge auto-launch on boot) — currently a shared template.
+  - Per-printer "current order" overlay once filename matching works
+    (cross-reference subtask_name against `orders.json`).
+
+---
+
+### Filename matching for SD-touchscreen prints (idea)
+
+- **Status:** idea, gated by upload-path decision
+- **Why:** The dashboard currently can't tell what 3MF is printing when a
+  staffer started the job from the printer's touchscreen against an SD
+  card. Without that, we can't link a running print back to the patron's
+  ledger row in `orders.json`, which is the prereq for "current order"
+  overlays, "X minutes left" notifications, and post-print reconciliation.
+- **What we observed empirically (60s MQTT capture across 54 reports):**
+  - `print.subtask_name`, `subtask_id`, `print_type`, `profile_id`,
+    `model_id` — all empty for the duration of an SD-touchscreen print.
+  - `print.gcode_file` and `file` — the literal string
+    `"/data/Metadata/plate_1.gcode"`, useless (it's the printer's
+    internal extracted-gcode path; the original 3MF name is gone).
+  - `print.task_id` — `"478"` (printer-internal counter, increments per
+    print). Useful as a stable id for binding eavesdropped names to.
+  - `print.sdcard` — `True`. Useful as a positive signal "this is an SD
+    print, filename will not be transmitted" — could replace the current
+    "Local print (no filename sent)" label with something less ambiguous.
+  - **Community libraries (`bambulabs_api`, HA Bambu) read the same
+    fields**; they don't have any secret sauce. Their results are only
+    as good as what the firmware publishes. For SD-touchscreen prints,
+    they're equally blind.
+- **Already shipped (catches non-SD prints):** the `/request` topic
+  eavesdropper in `printer_dashboard.PrinterClient._on_message` latches
+  `subtask_name` from any `project_file` command sent to the printer,
+  ties it to `task_id`, and clears on a new print. So Send-to-Printer /
+  Handy / cloud-initiated prints get filenames automatically.
+- **Options for the SD-touchscreen gap, in order of effort:**
+  1. **FTPS browse the SD card.** Port 990, same `bblp` + access-code
+     auth. List `.3mf` files at print-start, take the most recently
+     modified. Heuristic but ~95% accurate for single-user use.
+     ~30 lines + `aioftp` or stdlib `ftplib` over TLS. **Brittle:**
+     wrong file if a staffer uploaded multiple .3mfs in quick
+     succession or started an older one.
+  2. **Move the workflow to Send-to-Printer.** Replaces the SD-card
+     sneakernet entirely with the FTPS upload + MQTT `project_file`
+     command path (the auto-send proposal below already covers this).
+     Once shipped, every print has a real `subtask_name` and the
+     existing eavesdropper handles matching. **Recommended path** —
+     solves filename matching as a side effect of solving the
+     UX problem.
+- **Smaller polishing items independent of the above:**
+  - Use `print.sdcard` to label SD prints distinctly in the UI rather
+    than the current "Local print (no filename sent)" — small UX win
+    without solving the matching problem.
+  - Persist `task_id` → eavesdropped filename as a small JSON sidecar
+    so a dashboard restart mid-print doesn't lose the captured name.
 
 ---
 

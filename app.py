@@ -43,6 +43,7 @@ from slice_order import (  # noqa: E402
     PRINTERS, DEFAULT_PRINTER,
 )
 from email_parser import OLLAMA_MODEL, OLLAMA_URL, parse_email  # noqa: E402
+from printer_dashboard import hub as printer_hub, router as printer_router  # noqa: E402
 WORK_DIR = BASE_DIR / "printqueue" / "work"
 LEDGER_JSON = BASE_DIR / "printqueue" / "orders.json"
 SLICE_ORDER = BASE_DIR / "slice_order.py"
@@ -75,12 +76,17 @@ async def _warm_ollama() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     asyncio.create_task(_warm_ollama())
-    yield
+    printer_hub.start(asyncio.get_running_loop())
+    try:
+        yield
+    finally:
+        printer_hub.stop()
 
 
 app = FastAPI(title="Makerspace Print Intake", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+app.include_router(printer_router)
 
 
 # ---------- helpers ----------
