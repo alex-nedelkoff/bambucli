@@ -1429,7 +1429,23 @@ def _split_plates(src: Path, out_dir: Path, base_name: str) -> list[Path]:
 
 # ---------- receipt ----------
 
-RECEIPT_WIDTH = 42  # 80mm TM-T88V font A is ~42 chars per line
+RECEIPT_WIDTH = 28  # Empirical printable width on this TM-T88V + paper combo:
+# 48 spilled by ~20, then 32 spilled by ~4. 28 fits.
+
+
+def _box_label(label: str, width: int = RECEIPT_WIDTH, indent: int = 2) -> str:
+    """Format '{indent}Label ..... [ ]' padded to `width`. Used by both
+    the text-preview and ESC/POS print paths so the two layouts stay in
+    sync. Caller appends \\n as appropriate."""
+    pad = max(1, width - indent - len(label) - 3)
+    return f"{' ' * indent}{label}{' ' * pad}[ ]"
+
+
+def _signature_line(label: str = "Completed by:", width: int = RECEIPT_WIDTH) -> str:
+    """Format '  Label ___________' padded to `width`."""
+    prefix = f"  {label} "
+    underscores = max(4, width - len(prefix))
+    return f"{prefix}{'_' * underscores}"
 PRICE_PER_GRAM = 0.05  # CAD, library's current rate
 ORDER_TAKEN_BY = "Alex"
 
@@ -1493,9 +1509,9 @@ def _render_receipt_text(
     # Customer name — big/bold on hardware, upper+centred in preview
     lines.append(customer.upper().center(w))
     lines.append("")
-    lines.append(f"  Card:  {_format_card(card)}")
-    lines.append(f"  Date:  {_fmt_receipt_dt(when)}")
-    lines.append(f"  Needs waiver signed             [ ]")
+    lines.append(f"Card: {_format_card(card)}")
+    lines.append(f"Date: {_fmt_receipt_dt(when)}")
+    lines.append(_box_label("Needs waiver signed", indent=0))
     lines.append(thin)
 
     # Broadcast single colour to all plates if only one provided
@@ -1514,7 +1530,7 @@ def _render_receipt_text(
 
     # Plate table — same headers whether single- or multi-plate.
     lines.append(
-        f"{'Plate':<5}  {'Colour':<7}  {'Grams':>5}  {'Hr':>2}  {'Min':>3}  {'Completed':<9}"
+        f"{'#':<1} {'Colour':<6} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}"
     )
     for i, p in enumerate(plates):
         pn = p.get("plate", i + 1)
@@ -1522,14 +1538,18 @@ def _render_receipt_text(
         h = secs // 3600
         mins = (secs % 3600) // 60
         grams = p.get("weight_grams", 0.0) or 0.0
-        pc = (plate_colors[i] or "")[:7]
+        pc = (plate_colors[i] or "")[:6]
         lines.append(
-            f"{pn:>5}  {pc:<7}  {grams:>5.1f}  {h:>2}  {mins:>3}  {'[ ]':^9}"
+            f"{pn:>1} {pc:<6} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}"
         )
         if len(plates) > 1:
             for fname, qty in _files_for_plate(p):
-                display = fname if len(fname) <= w - 9 else fname[: w - 10] + "…"
-                lines.append(f"       {display} x {qty}")
+                # Layout: 7-space indent + display + " x " + qty == w
+                suffix = f" x {qty}"
+                avail = w - 7 - len(suffix)
+                display = fname if len(fname) <= avail else fname[: avail - 1] + "…"
+                lines.append(f"       {display}{suffix}")
+            lines.append("")  # blank line between plates
 
     lines.append(thin)
     lines.append(f"  Total:      ${price:.2f}")
@@ -1537,14 +1557,16 @@ def _render_receipt_text(
     lines.append(f"  Total time: {_fmt_time(total_time_s)}")
     lines.append("")
     lines.append(sep)
-    lines.append(f"  Order taken by:     {ORDER_TAKEN_BY}")
-    lines.append(f"  Charged in Koha                [ ]")
-    lines.append(f"  Order completed by: _________________")
-    lines.append(f"  SD card:            R1   R2   R3   B1")
-    lines.append(f"  Printer:            1    2    3")
+    lines.append(f"  Order taken by: {ORDER_TAKEN_BY}")
+    lines.append(_box_label("Charged in Koha"))
+    lines.append(_signature_line())
     lines.append("")
-    lines.append(f"  Customer contacted for pickup  [ ]")
-    lines.append(f"  Order picked up                [ ]")
+    lines.append(f"  SD card:  R1  R2  R3  B1")
+    lines.append("")
+    lines.append(f"  Printer:  1  2  3")
+    lines.append("")
+    lines.append(_box_label("Notified for pickup"))
+    lines.append(_box_label("Order picked up"))
     lines.append(sep)
     return "\n".join(lines) + "\n"
 
@@ -1601,26 +1623,33 @@ def _send_to_tm_t88v(
     except Exception as e:
         fail(f"could not open USB printer (VID=0x{EPSON_VID:04X} PID=0x{TM_T88V_PID:04X}): {e}")
 
+    # Use Font B (9x17) for body text — ~64 cpl on 80mm paper and a less
+    # 1:2-stretched aspect than Font A (12x24). set() is incremental in
+    # python-escpos 3.x so font='b' here sticks for all subsequent text.
+    p.set(font="b")
+
     sep = "=" * RECEIPT_WIDTH
     thin = "-" * RECEIPT_WIDTH
 
     # Top banner — one line, centred, bold
-    p.set(align="center", bold=True)
+    p.set(font="b", align="center", bold=True)
     p.text(sep + "\n")
     p.text("Makerspace @ McLean Branch · 3D Print\n")
     p.text(sep + "\n")
-    p.set(align="left", bold=False)
+    p.set(font="b", align="left", bold=False)
     p.text("\n")
 
-    # Customer name — double-height + bold, centred. Most important info.
-    p.set(align="center", bold=True, double_height=True)
+    # Customer name — double-WIDTH + bold, centred. double_width with Font B
+    # gives ~18x17 dots (squarish) instead of the 1:4 stretch you get with
+    # double_height. Most important info, eye-catching but not column-stealing.
+    p.set(font="b", align="center", bold=True, double_width=True)
     p.text(customer.upper() + "\n")
-    p.set(align="left", bold=False, double_height=False)
+    p.set(font="b", align="left", bold=False, double_width=False)
     p.text("\n")
 
-    p.text(f"  Card:  {_format_card(card)}\n")
-    p.text(f"  Date:  {_fmt_receipt_dt(when)}\n")
-    p.text(f"  Needs waiver signed             [ ]\n")
+    p.text(f"Card: {_format_card(card)}\n")
+    p.text(f"Date: {_fmt_receipt_dt(when)}\n")
+    p.text(_box_label("Needs waiver signed", indent=0) + "\n")
     p.text(thin + "\n")
 
     plate_colors = colors if len(colors) == len(plates) else [colors[0]] * len(plates)
@@ -1633,11 +1662,12 @@ def _send_to_tm_t88v(
             p.text(f"  File: {display:<{avail}} {count}\n")
         p.text("\n")
 
-    p.set(bold=True)
+    p.set(font="b", bold=True)
+    # Tight 30-char table (single-space gaps) to fit in RECEIPT_WIDTH=32.
     p.text(
-        f"{'Plate':<5}  {'Colour':<7}  {'Grams':>5}  {'Hr':>2}  {'Min':>3}  {'Completed':<9}\n"
+        f"{'#':<1} {'Colour':<6} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}\n"
     )
-    p.set(bold=False)
+    p.set(font="b", bold=False)
     for i, pl in enumerate(plates):
         pn = pl.get("plate", i + 1)
         secs = pl.get("prediction_seconds", 0) or 0
@@ -1646,29 +1676,34 @@ def _send_to_tm_t88v(
         grams = pl.get("weight_grams", 0.0) or 0.0
         pc = (plate_colors[i] or "")[:7]
         p.text(
-            f"{pn:>5}  {pc:<7}  {grams:>5.1f}  {h:>2}  {mins:>3}  {'[ ]':^9}\n"
+            f"{pn:>1} {pc:<6} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}\n"
         )
         if len(plates) > 1:
             for fname, qty in _files_for_plate(pl):
-                display = fname if len(fname) <= RECEIPT_WIDTH - 9 else fname[: RECEIPT_WIDTH - 10] + "…"
-                p.text(f"       {display} x {qty}\n")
+                suffix = f" x {qty}"
+                avail = RECEIPT_WIDTH - 7 - len(suffix)
+                display = fname if len(fname) <= avail else fname[: avail - 1] + "…"
+                p.text(f"       {display}{suffix}\n")
+            p.text("\n")  # blank line between plates
 
     p.text(thin + "\n")
-    p.set(bold=True)
+    p.set(font="b", bold=True)
     p.text(f"  Total:      ${price:.2f}\n")
-    p.set(bold=False)
+    p.set(font="b", bold=False)
     p.text(f"  Total mass: {total_mass_g:.1f} g\n")
     p.text(f"  Total time: {_fmt_time(total_time_s)}\n")
     p.text("\n")
     p.text(sep + "\n")
-    p.text(f"  Order taken by:     {ORDER_TAKEN_BY}\n")
-    p.text(f"  Charged in Koha                [ ]\n")
-    p.text(f"  Order completed by: _________________\n")
-    p.text(f"  SD card:            R1   R2   R3   B1\n")
-    p.text(f"  Printer:            1    2    3\n")
+    p.text(f"  Order taken by: {ORDER_TAKEN_BY}\n")
+    p.text(_box_label("Charged in Koha") + "\n")
+    p.text(_signature_line() + "\n")
     p.text("\n")
-    p.text(f"  Customer contacted for pickup  [ ]\n")
-    p.text(f"  Order picked up                [ ]\n")
+    p.text(f"  SD card:  R1  R2  R3  B1\n")
+    p.text("\n")
+    p.text(f"  Printer:  1  2  3\n")
+    p.text("\n")
+    p.text(_box_label("Notified for pickup") + "\n")
+    p.text(_box_label("Order picked up") + "\n")
     p.text(sep + "\n\n\n")
     p.cut()
 
