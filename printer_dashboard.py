@@ -324,11 +324,18 @@ class PrinterClient:
             "eavesdrop_request",
             not str(cfg.get("model", "")).upper().startswith("P1"),
         )
+        # Per-printer toggle for the RTSPS snapshot loop. Default on,
+        # but printers.json can set "webcam_enabled": false to skip it
+        # — useful for cameras with quirky/unstable streams (e.g. P1S
+        # over LAN-only at the moment) where the broken-frame errors
+        # add noise without telling staff anything new.
+        self.webcam_enabled: bool = bool(cfg.get("webcam_enabled", True))
         self.state: dict = {
             "id": self.id,
             "label": cfg.get("label", self.id),
             "model": cfg.get("model", ""),
             "online": False,
+            "webcam_enabled": bool(cfg.get("webcam_enabled", True)),
             "last_error": None,
             # Wall-clock when we last lost the connection — used by the UI
             # to suppress error flashes during the normal reconnect window
@@ -712,7 +719,8 @@ class DashboardHub:
             client = PrinterClient(cfg, self)
             self.clients[client.id] = client
             client.start()
-            client._snapshot_task = loop.create_task(client._snapshot_loop())
+            if client.webcam_enabled:
+                client._snapshot_task = loop.create_task(client._snapshot_loop())
             client._reconnect_task = loop.create_task(client._reconnect_watchdog())
         self._grams_fetch_task = loop.create_task(self._grams_fetch_loop())
 

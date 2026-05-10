@@ -298,13 +298,19 @@
     // we bump every time _snapshot_loop() finishes successfully. That avoids
     // clobbering the previous image with a broken-img X if the next refresh
     // fails — we only swap when there's a fresh JPEG on disk.
-    const camHtml = `
-      <div class="cam-wrap">
-        ${snap.snapshot_ok
-          ? `<img src="/snapshot/${snap.id}.jpg?v=${snap.snapshot_seq ?? 0}" alt="" onerror="this.style.display='none'">
-             <div class="cam-stamp">cam · ${camLabelFor(snap)}</div>`
-          : `<span class="cam-empty">${snap.snapshot_error ? 'camera: ' + snap.snapshot_error : 'waiting for camera…'}</span>`}
-      </div>`;
+    //
+    // webcam_enabled=false (set per-printer in printers.json) skips this
+    // block entirely so the tile renders without an empty cam frame.
+    let camHtml = '';
+    if (snap.webcam_enabled !== false) {
+      camHtml = `
+        <div class="cam-wrap">
+          ${snap.snapshot_ok
+            ? `<img src="/snapshot/${snap.id}.jpg?v=${snap.snapshot_seq ?? 0}" alt="" onerror="this.style.display='none'">
+               <div class="cam-stamp">cam · ${camLabelFor(snap)}</div>`
+            : `<span class="cam-empty">${snap.snapshot_error ? 'camera: ' + snap.snapshot_error : 'waiting for camera…'}</span>`}
+        </div>`;
+    }
 
     const fileTitle = fileInfo.label && !fileInfo.generic ? ` title="${fileInfo.label}"` : '';
     const fileLabel = fileInfo.label
