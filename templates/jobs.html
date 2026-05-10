@@ -70,11 +70,12 @@
         <td class="ts-cell">{{ j._started_at_short }}</td>
         <td class="numeric">{{ j._duration_label }}</td>
         <td class="numeric">
-          <input type="number" class="editable-num" step="0.1" min="0"
+          <input type="number" class="editable-num{% if j._grams_class %} {{ j._grams_class }}{% endif %}"
+                 step="0.1" min="0"
                  data-field="actual_grams"
                  value="{{ '%.1f' % j.actual_grams if j.actual_grams is not none else '' }}"
-                 placeholder="{{ '%.1f' % j.predicted_grams if j.predicted_grams is not none else '' }}"
-                 title="Actual grams used. Placeholder shows the slicer's prediction.">
+                 placeholder="{% if j._grams_label %}{{ j._grams_label }}{% elif j.predicted_grams is not none %}{{ '%.1f' % j.predicted_grams }}{% endif %}"
+                 title="{% if j._grams_class == 'grams-failed' %}Auto-fetch couldn't find the source 3MF on the printer (likely a cloud / Handy print). Type the grams manually if known.{% elif j._grams_class == 'grams-pending' %}Auto-fetch in queue — should populate within a minute.{% else %}Actual grams used. Placeholder shows the slicer's prediction.{% endif %}">
           <span class="dim grams-suffix">g</span>
         </td>
         <td>

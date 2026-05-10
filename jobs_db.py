@@ -73,12 +73,26 @@ _MIGRATIONS: list[tuple[str, str]] = [
     ("is_manually_edited", "ALTER TABLE jobs ADD COLUMN is_manually_edited INTEGER DEFAULT 0"),
     # State machine for the grams auto-fetcher in printer_dashboard.py:
     #   NULL    = couldn't resolve locally yet, but no fetch attempt scheduled
-    #   pending = needs fetch from the printer's FTP storage
+    #   pending = will be tried (or retried subject to attempts cap and
+    #             RETRY_DELAY_MINUTES delay since the last attempt)
     #   done    = grams resolved (either locally or via FTP fetch)
-    #   failed  = fetch attempted, didn't work
-    #   skipped = file naming didn't give us anything to fetch
-    ("grams_fetch_state",  "ALTER TABLE jobs ADD COLUMN grams_fetch_state TEXT"),
+    #   failed  = retries exhausted; won't be tried again automatically
+    #   skipped = no filename to fetch from
+    ("grams_fetch_state",         "ALTER TABLE jobs ADD COLUMN grams_fetch_state TEXT"),
+    # Retry bookkeeping. Each fetch attempt bumps `attempts` and
+    # writes `last_attempt`. The candidate query gates on both: stop
+    # retrying once attempts hit MAX_FETCH_ATTEMPTS, and don't fire
+    # again until RETRY_DELAY_MINUTES has elapsed since the last try.
+    ("grams_fetch_attempts",      "ALTER TABLE jobs ADD COLUMN grams_fetch_attempts INTEGER DEFAULT 0"),
+    ("grams_fetch_last_attempt",  "ALTER TABLE jobs ADD COLUMN grams_fetch_last_attempt TEXT"),
 ]
+
+# Tunables for the FTP-fetch retry loop. 4 attempts × 30 min ≈ 2 hours
+# of patience before giving up — long enough that a print started
+# from the cloud and re-cached to FTP-visible storage by some firmware
+# transition has a realistic chance to land.
+MAX_FETCH_ATTEMPTS = 4
+RETRY_DELAY_MINUTES = 30
 
 
 def _apply_migrations(c: sqlite3.Connection) -> None:
@@ -94,6 +108,17 @@ def _apply_migrations(c: sqlite3.Connection) -> None:
     c.execute(
         "UPDATE jobs SET grams_fetch_state = 'pending' "
         "WHERE grams_fetch_state IS NULL "
+        "  AND predicted_grams IS NULL "
+        "  AND filename IS NOT NULL"
+    )
+    # One-shot re-arm of rows that hit 'failed' under the previous
+    # no-retry behaviour. Reset attempts so they get the full new
+    # retry budget. We can tell pre-retry rows from post-retry ones
+    # because attempts is still 0 on the legacy ones.
+    c.execute(
+        "UPDATE jobs SET grams_fetch_state = 'pending' "
+        "WHERE grams_fetch_state = 'failed' "
+        "  AND COALESCE(grams_fetch_attempts, 0) = 0 "
         "  AND predicted_grams IS NULL "
         "  AND filename IS NOT NULL"
     )
@@ -525,23 +550,31 @@ def update_job(job_id: int, fields: dict) -> dict:
 
 
 def find_grams_fetch_candidates(*, limit: int = 5, max_age_hours: int = 24) -> list[dict]:
-    """Rows the FTP-fetch loop should try next: grams unresolved, file
+    """Rows the FTP-fetch loop should try next: 'pending' state, file
     name known, last seen recently enough that the file is probably
-    still on the printer's storage. Older rows are skipped because
-    Bambu printers rotate their internal storage and the file's likely
-    gone."""
-    cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    still on the printer's storage, attempts under the cap, and either
+    never tried before or due for a retry. Sorted with never-tried
+    rows first (they have NULL last_attempt) so cold queue drains
+    before retries."""
+    age_cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds")
+    retry_cutoff = (datetime.now() - timedelta(minutes=RETRY_DELAY_MINUTES)).isoformat(timespec="seconds")
     with _lock:
         c = _connect()
         rows = c.execute(
             "SELECT id, printer_id, subtask_name, filename, outcome, "
-            "last_percent, predicted_grams "
+            "last_percent, predicted_grams, "
+            "COALESCE(grams_fetch_attempts, 0) AS grams_fetch_attempts "
             "FROM jobs "
             "WHERE grams_fetch_state = 'pending' "
             "  AND filename IS NOT NULL "
             "  AND last_seen >= ? "
-            "ORDER BY last_seen DESC LIMIT ?",
-            (cutoff, limit),
+            "  AND COALESCE(grams_fetch_attempts, 0) < ? "
+            "  AND (grams_fetch_last_attempt IS NULL "
+            "       OR grams_fetch_last_attempt < ?) "
+            "ORDER BY (grams_fetch_last_attempt IS NULL) DESC, "
+            "         last_seen DESC "
+            "LIMIT ?",
+            (age_cutoff, MAX_FETCH_ATTEMPTS, retry_cutoff, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -570,9 +603,32 @@ def set_grams_fetched(job_id: int, predicted_grams: float, *,
         c.commit()
 
 
+def record_grams_fetch_failure(job_id: int) -> None:
+    """Bump attempts + last_attempt after a failed FTP fetch. Keeps
+    the row 'pending' until attempts hits MAX_FETCH_ATTEMPTS, at which
+    point it transitions to 'failed' (terminal — won't be retried).
+    Atomic: a single UPDATE so we don't race with a concurrent
+    candidate query."""
+    now = _now_iso()
+    with _lock:
+        c = _connect()
+        c.execute(
+            "UPDATE jobs SET "
+            "  grams_fetch_attempts = COALESCE(grams_fetch_attempts, 0) + 1, "
+            "  grams_fetch_last_attempt = ?, "
+            "  grams_fetch_state = CASE "
+            "    WHEN COALESCE(grams_fetch_attempts, 0) + 1 >= ? THEN 'failed' "
+            "    ELSE 'pending' END "
+            "WHERE id = ?",
+            (now, MAX_FETCH_ATTEMPTS, job_id),
+        )
+        c.commit()
+
+
 def set_grams_fetch_state(job_id: int, state: str) -> None:
-    """Move the fetch state machine forward (typically to 'failed' or
-    'skipped') so the loop stops retrying."""
+    """Force a state transition. Used by the loop for terminal
+    transitions outside the normal retry path (e.g. 'skipped' when
+    the printer client is missing)."""
     with _lock:
         c = _connect()
         c.execute(

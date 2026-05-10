@@ -758,6 +758,8 @@ class DashboardHub:
         for cand in candidates:
             client = self.clients.get(cand["printer_id"])
             if client is None:
+                # No live client for this printer — can't ever fetch,
+                # bypass the retry budget and mark terminal.
                 jobs_db.set_grams_fetch_state(cand["id"], "failed")
                 continue
             try:
@@ -765,10 +767,13 @@ class DashboardHub:
                     self._fetch_grams_for, client.cfg, cand["filename"],
                 )
             except Exception:
-                jobs_db.set_grams_fetch_state(cand["id"], "failed")
+                # Network / FTP error. Counts as one of the retry
+                # attempts; the row stays 'pending' until we exhaust
+                # MAX_FETCH_ATTEMPTS, then promotes itself to 'failed'.
+                jobs_db.record_grams_fetch_failure(cand["id"])
                 continue
             if grams is None or grams <= 0:
-                jobs_db.set_grams_fetch_state(cand["id"], "failed")
+                jobs_db.record_grams_fetch_failure(cand["id"])
                 continue
             # If the print is already terminal, scale by the latched
             # final percent so actual_grams gets the same treatment as
@@ -1156,14 +1161,30 @@ async def jobs_page(request: Request) -> HTMLResponse:
         actual = j.get("actual_grams")
         pred   = j.get("predicted_grams")
         pct    = j.get("last_percent")
+        fetch  = j.get("grams_fetch_state")
         if actual is not None:
             j["_grams_label"] = f"{actual:.1f} g"
+            j["_grams_class"] = ""
         elif pred is not None and pct is not None and j.get("outcome") == "running":
             j["_grams_label"] = f"~{pred * pct / 100.0:.1f} / {pred:.1f} g"
+            j["_grams_class"] = ""
         elif pred is not None:
             j["_grams_label"] = f"~{pred:.1f} g"
+            j["_grams_class"] = ""
+        elif fetch == "failed":
+            # Auto-fetch tried and couldn't find the source 3MF (most
+            # common cause: Bambu cloud / Handy print whose file never
+            # landed in FTP-visible storage). Surface this so staff
+            # know they need to type grams manually instead of
+            # waiting for an auto-fill that won't come.
+            j["_grams_label"] = "n/a"
+            j["_grams_class"] = "grams-failed"
+        elif fetch == "pending":
+            j["_grams_label"] = "…"
+            j["_grams_class"] = "grams-pending"
         else:
             j["_grams_label"] = ""
+            j["_grams_class"] = ""
 
     return templates.TemplateResponse(request, "jobs.html", {
         "jobs": jobs,
