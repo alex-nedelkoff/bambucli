@@ -34,6 +34,8 @@ from fastapi import APIRouter, Form, HTTPException, Request, WebSocket, WebSocke
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 
+import jobs_db
+
 # Resolved once at import — get_ffmpeg_exe() does filesystem probes and we
 # call _grab_snapshot once per minute per printer. No reason to re-probe.
 _FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -461,8 +463,35 @@ class PrinterClient:
         # the UI can read state["report"]["print"] uniformly.
         _deep_merge(self.state["report"], payload)
         self._update_filename_capture()
+        self._log_job_observation()
         self.state["online"] = True
         self.hub.notify(self.id)
+
+    def _log_job_observation(self) -> None:
+        """Shadow the live job state to printqueue/jobs.db so we have a
+        durable record of every print the dashboard ever saw — including
+        ones started outside the web intake (Bambu Studio sends, SD-card
+        prints from the touchscreen). jobs_db.record_observation handles
+        dedupe + transition tracking; we just feed it whatever the
+        latest report says, plus the captured_filename fallback for
+        firmwares that drop subtask_name from steady-state reports."""
+        p = (self.state.get("report") or {}).get("print") or {}
+        try:
+            jobs_db.record_observation(
+                self.id,
+                task_id=p.get("task_id"),
+                subtask_name=(p.get("subtask_name") or "").strip() or None,
+                gcode_state=p.get("gcode_state"),
+                print_error=p.get("print_error"),
+                prediction_seconds=p.get("mc_print_total_time") or None,
+                total_layers=p.get("total_layer_num") or None,
+                captured_filename=self.state.get("captured_filename"),
+                mc_percent=p.get("mc_percent"),
+            )
+        except Exception:
+            # Logging must not break the dashboard's MQTT loop. The
+            # row simply won't exist; the next report will retry.
+            pass
 
     def _update_filename_capture(self) -> None:
         """Reconcile captured_filename against the latest report.
@@ -803,6 +832,86 @@ async def api_printers_send(
         use_ams=str(use_ams).lower() in ("1", "true", "yes", "on"),
         ams_mapping=mapping,
     )
+
+
+@router.get("/api/jobs")
+async def api_jobs(
+    limit: int = 200,
+    printer_id: str | None = None,
+    capture_source: str | None = None,
+) -> dict:
+    """Recent observed jobs from jobs.db. Returned newest-first.
+
+    Filters: `printer_id` (e.g. p2/p3/p1s) and `capture_source` (one of
+    local-slice / local-import / sd-card-or-other). The page at /jobs
+    fetches this; staff using the API directly can pass
+    capture_source=sd-card-or-other to find prints not in the patron
+    ledger."""
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be 1..1000")
+    return {
+        "jobs": jobs_db.list_jobs(
+            limit=limit,
+            printer_id=printer_id,
+            capture_source=capture_source,
+        ),
+        "stats": jobs_db.stats(),
+    }
+
+
+@router.get("/jobs", response_class=HTMLResponse)
+async def jobs_page(request: Request) -> HTMLResponse:
+    """Reconciliation view — every job the dashboard saw, with a flag
+    on the ones that don't match an entry in printqueue/orders.json."""
+    import datetime as _dt
+
+    def _fmt_hm(seconds: int) -> str:
+        h, rem = divmod(int(seconds), 3600)
+        mins = rem // 60
+        return f"{h}h{mins:02d}m" if h else f"{mins}m"
+
+    jobs = jobs_db.list_jobs(limit=500)
+    now = _dt.datetime.now()
+    for j in jobs:
+        for fld in ("started_at", "finished_at", "last_seen"):
+            v = j.get(fld) or ""
+            j[f"_{fld}_short"] = f"{v[5:10]} {v[11:16]}" if len(v) >= 16 else v
+
+        # Duration: completed jobs use the persisted total; in-flight
+        # jobs use (now - started_at) so the column doesn't show blank
+        # for prints we're currently watching.
+        dur = j.get("duration_seconds")
+        if dur:
+            j["_duration_label"] = _fmt_hm(dur)
+        elif j.get("started_at") and not j.get("finished_at"):
+            try:
+                s = _dt.datetime.fromisoformat(j["started_at"])
+                j["_duration_label"] = f"{_fmt_hm(int((now - s).total_seconds()))} so far"
+            except ValueError:
+                j["_duration_label"] = ""
+        else:
+            j["_duration_label"] = ""
+
+        # Filament: prefer the persisted actual (set at terminal). For
+        # in-flight jobs, scale the slicer prediction by current percent
+        # so staff can eyeball "how much filament we're burning right
+        # now" without the row going blank.
+        actual = j.get("actual_grams")
+        pred   = j.get("predicted_grams")
+        pct    = j.get("last_percent")
+        if actual is not None:
+            j["_grams_label"] = f"{actual:.1f} g"
+        elif pred is not None and pct is not None and j.get("outcome") == "running":
+            j["_grams_label"] = f"~{pred * pct / 100.0:.1f} / {pred:.1f} g"
+        elif pred is not None:
+            j["_grams_label"] = f"~{pred:.1f} g"
+        else:
+            j["_grams_label"] = ""
+
+    return templates.TemplateResponse(request, "jobs.html", {
+        "jobs": jobs,
+        "stats": jobs_db.stats(),
+    })
 
 
 @router.websocket("/ws/printers")

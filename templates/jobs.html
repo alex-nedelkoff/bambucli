@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Jobs Log{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="history-header">
+    <h2>Jobs Log</h2>
+    <div class="history-actions">
+      <span class="dim">Live record from the dashboard. Untracked jobs are prints we saw on a printer but didn't go through the web intake.</span>
+    </div>
+  </div>
+
+  <dl class="summary history-summary">
+    <dt>Total jobs seen</dt>     <dd>{{ stats.total }}</dd>
+    <dt>Untracked</dt>           <dd>{{ stats.unmatched }}</dd>
+    <dt>Finished</dt>            <dd>{{ stats.by_outcome.get('finished', 0) }}</dd>
+    <dt>Failed</dt>              <dd>{{ stats.by_outcome.get('failed', 0) }}</dd>
+    <dt>Filament (finished)</dt> <dd>{{ "%.1f" % stats.grams_actual }} g</dd>
+    <dt>Filament (committed)</dt><dd>{{ "%.1f" % stats.grams_committed }} g</dd>
+  </dl>
+
+  <div class="field" style="margin-bottom: 0;">
+    <select id="jobs-filter" autocomplete="off">
+      <option value="">All sources</option>
+      <option value="local-slice">Local — sliced via web</option>
+      <option value="local-import">Local — imported 3MF</option>
+      <option value="sd-card-or-other">Untracked (SD card / Studio / other)</option>
+    </select>
+  </div>
+
+  {% if jobs %}
+  <table class="history-table">
+    <thead>
+      <tr>
+        <th>Last seen</th>
+        <th>Printer</th>
+        <th>File</th>
+        <th>State</th>
+        <th>Outcome</th>
+        <th>Started</th>
+        <th>Duration</th>
+        <th>Filament</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody id="jobs-tbody">
+      {% for j in jobs %}
+      <tr class="job-row" data-source="{{ j.capture_source or 'sd-card-or-other' }}">
+        <td class="ts-cell">{{ j._last_seen_short }}</td>
+        <td><span class="printer-badge printer-{{ j.printer_id }}">{{ j.printer_id | upper }}</span></td>
+        <td>
+          {% if j.filename %}
+            <code class="filename-cell">{{ j.filename }}</code>
+          {% elif j.subtask_name %}
+            <code class="filename-cell">{{ j.subtask_name }}</code>
+          {% else %}
+            <span class="dim">—</span>
+          {% endif %}
+        </td>
+        <td>{{ j.gcode_state or '—' }}</td>
+        <td>
+          {% if j.outcome == 'finished' %}<span class="flow-badge flow-slice">finished</span>
+          {% elif j.outcome == 'failed' %}<span class="flow-badge" style="background:#fde2e2;color:#7a1f1f;">failed</span>
+          {% elif j.outcome == 'running' %}<span class="flow-badge flow-import">running</span>
+          {% elif j.outcome == 'cancelled' %}<span class="flow-badge" style="background:#eee;color:#555;">cancelled</span>
+          {% else %}<span class="dim">{{ j.outcome or 'unknown' }}</span>
+          {% endif %}
+        </td>
+        <td class="ts-cell">{{ j._started_at_short }}</td>
+        <td class="numeric">{{ j._duration_label }}</td>
+        <td class="numeric">{{ j._grams_label }}</td>
+        <td>
+          {% if j.capture_source == 'local-slice' %}
+            <span class="flow-badge flow-slice">web · slice</span>
+          {% elif j.capture_source == 'local-import' %}
+            <span class="flow-badge flow-import">web · import</span>
+          {% elif j.capture_source == 'local-other' %}
+            <span class="flow-badge">web</span>
+          {% else %}
+            <span class="flow-badge" style="background:#fff3d6;color:#6b4500;">untracked</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p id="jobs-empty" class="empty-msg" style="display:none;">No jobs match this filter.</p>
+  {% else %}
+  <p class="empty-msg">No jobs observed yet — the dashboard logs every print as it sees it on MQTT.</p>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  const sel = document.getElementById('jobs-filter');
+  const rows = document.querySelectorAll('.job-row');
+  const empty = document.getElementById('jobs-empty');
+  if (!sel) return;
+  sel.addEventListener('change', () => {
+    const v = sel.value;
+    let visible = 0;
+    rows.forEach(r => {
+      const match = !v || r.dataset.source === v;
+      r.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (empty) empty.style.display = visible ? 'none' : '';
+  });
+})();
+</script>
+{% endblock %}
