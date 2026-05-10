@@ -40,44 +40,58 @@
         <th>Duration</th>
         <th>Filament</th>
         <th>Source</th>
+        <th class="actions-col"></th>
       </tr>
     </thead>
     <tbody id="jobs-tbody">
       {% for j in jobs %}
-      <tr class="job-row" data-source="{{ j.capture_source or 'sd-card-or-other' }}">
-        <td class="ts-cell">{{ j._last_seen_short }}</td>
+      {# data-job-id and data-* mirroring is what the inline-edit JS
+         keys off when posting back to /api/jobs/<id>. #}
+      <tr class="job-row" data-job-id="{{ j.id }}"
+          data-source="{{ j.capture_source or 'sd-card-or-other' }}"
+          {% if j.is_manually_edited %}data-edited="1"{% endif %}>
+        <td class="ts-cell">{{ j._last_seen_short }}{% if j.is_manually_edited %} <span title="Manually edited — observer won't overwrite" class="edited-mark">✎</span>{% endif %}</td>
         <td><span class="printer-badge printer-{{ j.printer_id }}">{{ j.printer_id | upper }}</span></td>
         <td>
-          {% if j.filename %}
-            <code class="filename-cell">{{ j.filename }}</code>
-          {% elif j.subtask_name %}
-            <code class="filename-cell">{{ j.subtask_name }}</code>
-          {% else %}
-            <span class="dim">—</span>
-          {% endif %}
+          <span class="editable" data-field="subtask_name"
+                title="Click to edit filename">{{ j.subtask_name or '' }}</span>
         </td>
         <td>{{ j.gcode_state or '—' }}</td>
         <td>
-          {% if j.outcome == 'finished' %}<span class="flow-badge flow-slice">finished</span>
-          {% elif j.outcome == 'failed' %}<span class="flow-badge" style="background:#fde2e2;color:#7a1f1f;">failed</span>
-          {% elif j.outcome == 'running' %}<span class="flow-badge flow-import">running</span>
-          {% elif j.outcome == 'cancelled' %}<span class="flow-badge" style="background:#eee;color:#555;">cancelled</span>
-          {% else %}<span class="dim">{{ j.outcome or 'unknown' }}</span>
-          {% endif %}
+          <select class="editable-select" data-field="outcome">
+            <option value=""           {% if not j.outcome %}selected{% endif %}>—</option>
+            <option value="finished"   {% if j.outcome == 'finished' %}selected{% endif %}>finished</option>
+            <option value="failed"     {% if j.outcome == 'failed' %}selected{% endif %}>failed</option>
+            <option value="cancelled"  {% if j.outcome == 'cancelled' %}selected{% endif %}>cancelled</option>
+            <option value="running"    {% if j.outcome == 'running' %}selected{% endif %}>running</option>
+            <option value="unknown"    {% if j.outcome == 'unknown' %}selected{% endif %}>unknown</option>
+          </select>
         </td>
         <td class="ts-cell">{{ j._started_at_short }}</td>
         <td class="numeric">{{ j._duration_label }}</td>
-        <td class="numeric">{{ j._grams_label }}</td>
+        <td class="numeric">
+          <input type="number" class="editable-num" step="0.1" min="0"
+                 data-field="actual_grams"
+                 value="{{ '%.1f' % j.actual_grams if j.actual_grams is not none else '' }}"
+                 placeholder="{{ '%.1f' % j.predicted_grams if j.predicted_grams is not none else '' }}"
+                 title="Actual grams used. Placeholder shows the slicer's prediction.">
+          <span class="dim grams-suffix">g</span>
+        </td>
         <td>
-          {% if j.capture_source == 'local-slice' %}
-            <span class="flow-badge flow-slice">web · slice</span>
-          {% elif j.capture_source == 'local-import' %}
-            <span class="flow-badge flow-import">web · import</span>
-          {% elif j.capture_source == 'local-other' %}
-            <span class="flow-badge">web</span>
-          {% else %}
-            <span class="flow-badge" style="background:#fff3d6;color:#6b4500;">untracked</span>
-          {% endif %}
+          <select class="editable-select" data-field="capture_source">
+            <option value=""                  {% if not j.capture_source %}selected{% endif %}>—</option>
+            <option value="local-slice"       {% if j.capture_source == 'local-slice' %}selected{% endif %}>web · slice</option>
+            <option value="local-import"      {% if j.capture_source == 'local-import' %}selected{% endif %}>web · import</option>
+            <option value="local-other"       {% if j.capture_source == 'local-other' %}selected{% endif %}>web · other</option>
+            <option value="studio-send"       {% if j.capture_source == 'studio-send' %}selected{% endif %}>studio</option>
+            <option value="sd-card-or-other"  {% if j.capture_source == 'sd-card-or-other' %}selected{% endif %}>untracked</option>
+          </select>
+        </td>
+        <td class="actions-col">
+          <button type="button" class="button-mini job-delete-btn"
+                  title="Delete job entry"
+                  data-filename="{{ j.subtask_name or '(no name)' }}"
+                  data-printer="{{ j.printer_id }}">🗑</button>
         </td>
       </tr>
       {% endfor %}
@@ -91,19 +105,156 @@
 
 <script>
 (function() {
+  // Source filter (unchanged)
   const sel = document.getElementById('jobs-filter');
   const rows = document.querySelectorAll('.job-row');
   const empty = document.getElementById('jobs-empty');
-  if (!sel) return;
-  sel.addEventListener('change', () => {
-    const v = sel.value;
-    let visible = 0;
-    rows.forEach(r => {
-      const match = !v || r.dataset.source === v;
-      r.style.display = match ? '' : 'none';
-      if (match) visible++;
+  if (sel) {
+    sel.addEventListener('change', () => {
+      const v = sel.value;
+      let visible = 0;
+      rows.forEach(r => {
+        const match = !v || r.dataset.source === v;
+        r.style.display = match ? '' : 'none';
+        if (match) visible++;
+      });
+      if (empty) empty.style.display = visible ? 'none' : '';
     });
-    if (empty) empty.style.display = visible ? 'none' : '';
+  }
+
+  // ----- Inline editing -----
+  // Saves on blur (text/number) or change (select). On success the
+  // cell flashes green; on failure it reverts and flashes red. The
+  // server marks the row is_manually_edited=1 the first time, which
+  // tells the MQTT observer to stop clobbering these fields on
+  // future report frames.
+  async function saveField(jobId, field, value) {
+    const res = await fetch(`/api/jobs/${jobId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: value }),
+    });
+    if (!res.ok) {
+      const detail = (await res.text()).slice(0, 200);
+      throw new Error(`HTTP ${res.status}: ${detail}`);
+    }
+    return res.json();
+  }
+
+  function flash(el, cls) {
+    el.classList.add(cls);
+    setTimeout(() => el.classList.remove(cls), 900);
+  }
+
+  function markRowEdited(tr) {
+    tr.dataset.edited = '1';
+    const tsCell = tr.querySelector('.ts-cell');
+    if (tsCell && !tsCell.querySelector('.edited-mark')) {
+      const mark = document.createElement('span');
+      mark.className = 'edited-mark';
+      mark.title = "Manually edited — observer won't overwrite";
+      mark.textContent = ' ✎';
+      tsCell.appendChild(mark);
+    }
+  }
+
+  // Contenteditable spans (text fields)
+  document.querySelectorAll('.editable').forEach(el => {
+    el.contentEditable = 'true';
+    el.spellcheck = false;
+    let original = el.textContent.trim();
+    el.addEventListener('focus', () => { original = el.textContent.trim(); });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+      if (e.key === 'Escape') { el.textContent = original; el.blur(); }
+    });
+    el.addEventListener('blur', async () => {
+      const val = el.textContent.trim();
+      if (val === original) return;
+      const tr = el.closest('tr');
+      try {
+        await saveField(tr.dataset.jobId, el.dataset.field, val);
+        original = val;
+        markRowEdited(tr);
+        flash(el, 'edit-saved');
+      } catch (e) {
+        el.textContent = original;
+        flash(el, 'edit-failed');
+        console.error('save failed', e);
+      }
+    });
+  });
+
+  // <select> dropdowns — save on change, no blur dance needed.
+  document.querySelectorAll('.editable-select').forEach(el => {
+    let original = el.value;
+    el.addEventListener('change', async () => {
+      const val = el.value;
+      const tr = el.closest('tr');
+      try {
+        await saveField(tr.dataset.jobId, el.dataset.field, val);
+        original = val;
+        markRowEdited(tr);
+        flash(el, 'edit-saved');
+        // Keep the source filter consistent if capture_source changed.
+        if (el.dataset.field === 'capture_source') {
+          tr.dataset.source = val || 'sd-card-or-other';
+        }
+      } catch (e) {
+        el.value = original;
+        flash(el, 'edit-failed');
+        console.error('save failed', e);
+      }
+    });
+  });
+
+  // Delete buttons — same pattern as the order history page.
+  document.querySelectorAll('.job-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const tr = btn.closest('tr');
+      const jobId = tr.dataset.jobId;
+      const fn = btn.dataset.filename;
+      const printer = (btn.dataset.printer || '').toUpperCase();
+      const msg = `Delete job entry?\n\n${fn}\n  on ${printer}\n\nThe row will reappear if the printer is still publishing this task on MQTT.`;
+      if (!confirm(msg)) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const detail = (await res.text()).slice(0, 200);
+          throw new Error(`HTTP ${res.status}: ${detail}`);
+        }
+        tr.remove();
+      } catch (e) {
+        btn.disabled = false;
+        alert('Delete failed: ' + e.message);
+      }
+    });
+  });
+
+  // Number inputs (actual_grams)
+  document.querySelectorAll('.editable-num').forEach(el => {
+    let original = el.value;
+    el.addEventListener('focus', () => { original = el.value; });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+      if (e.key === 'Escape') { el.value = original; el.blur(); }
+    });
+    el.addEventListener('blur', async () => {
+      const val = el.value.trim();
+      if (val === original) return;
+      const tr = el.closest('tr');
+      try {
+        await saveField(tr.dataset.jobId, el.dataset.field, val);
+        original = val;
+        markRowEdited(tr);
+        flash(el, 'edit-saved');
+      } catch (e) {
+        el.value = original;
+        flash(el, 'edit-failed');
+        console.error('save failed', e);
+      }
+    });
   });
 })();
 </script>

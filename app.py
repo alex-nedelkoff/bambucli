@@ -269,6 +269,9 @@ async def history(request: Request) -> HTMLResponse:
         "total_grams": total_grams,
         "total_time_label": _fmt_time(total_seconds),
         "total_price": total_price,
+        # Same payload the result page uses — feeds the per-row
+        # send-to-printer modal's printer picker + AMS state.
+        "available_printers": printer_hub.list_printers(),
     })
 
 

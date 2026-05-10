@@ -607,3 +607,61 @@ table.uploads .inspecting-cell {
   max-width: 60%;
 }
 .mapping-select:disabled { opacity: 0.5; }
+
+.printer-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.printer-picker .button-mini { padding: 8px 14px; font-size: 13px; }
+
+/* Send button when the underlying 3MF has been pruned from disk —
+   visible (so staff can see the action exists per row) but de-emphasised. */
+.button-mini.dim-btn { opacity: 0.5; }
+.button-mini.dim-btn:hover { opacity: 1; }
+
+/* ----- Inline edit affordances on the jobs log ----- */
+.editable {
+  display: inline-block;
+  min-width: 60px;
+  padding: 2px 6px;
+  border: 1px dashed transparent;
+  border-radius: 3px;
+  cursor: text;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.editable:empty::before {
+  content: '—';
+  color: var(--muted);
+}
+.editable:hover { border-color: var(--border); background: #fafafa; }
+.editable:focus {
+  outline: none;
+  border-color: var(--orange);
+  background: white;
+}
+.editable-select {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: white;
+}
+.editable-num {
+  width: 60px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  text-align: right;
+}
+.grams-suffix { font-size: 11px; margin-left: 2px; }
+/* Flash animations on save / fail */
+.edit-saved { background: #d6f5d6 !important; transition: background 0.6s ease-out; }
+.edit-failed { background: #fbcaca !important; }
+.edited-mark { color: var(--muted); font-size: 11px; margin-left: 4px; }

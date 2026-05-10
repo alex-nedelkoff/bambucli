@@ -63,6 +63,20 @@
                     data-card="{{ r.card }}"
                     data-colors="{{ r.colors | join(',') }}">⎙</button>
           {% endif %}
+          {% if available_printers %}
+          {# Send button is shown for every order, even when the 3MF was
+             pruned from disk — staff can still see the action exists.
+             /api/printers/send returns a 404 with "file not found" when
+             the file isn't there, which surfaces in the modal as a
+             clear error. #}
+          <button type="button" class="button-mini history-send-btn{% if not r._file_exists %} dim-btn{% endif %}"
+                  title="{% if r._file_exists %}Send to printer{% else %}Send to printer (3MF no longer on disk){% endif %}"
+                  data-filename="{{ r.filename }}"
+                  data-customer="{{ r.customer }}"
+                  data-file-on-disk="{{ '1' if r._file_exists else '0' }}"
+                  data-sliced-model="{{ r.printer_model_id or '' }}"
+                  data-file-filaments='{{ r.file_filaments | default([]) | tojson }}'>▶</button>
+          {% endif %}
           <button type="button" class="button-mini delete-btn"
                   title="Delete order"
                   data-filename="{{ r.filename }}"
@@ -79,6 +93,38 @@
   <p class="empty-msg">No orders yet — submit one from the New Order page.</p>
   {% endif %}
 </div>
+
+{% if available_printers %}
+<div id="hsend-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="hsend-title">
+    <h3 id="hsend-title">Send to printer</h3>
+    <p class="modal-sub" id="hsend-sub"></p>
+    <div id="hsend-warn" class="warning" style="display:none;"></div>
+
+    <div class="modal-section">
+      <h4>Pick a printer</h4>
+      <div id="hsend-printer-list" class="printer-picker"></div>
+    </div>
+
+    <div class="modal-section" id="hsend-mapping-section" style="display:none;">
+      <label class="ams-toggle">
+        <input type="checkbox" id="hsend-use-ams" checked>
+        Use AMS (uncheck to print from the external spool only)
+      </label>
+      <h4>Filament mapping</h4>
+      <p class="hint">Pick which AMS slot supplies each filament in the file.
+        Slots that don't match the file's colour exactly will still print —
+        the printer doesn't enforce colour, just slot index.</p>
+      <div id="hsend-mapping-rows"></div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="button secondary" id="hsend-cancel">Cancel</button>
+      <button type="button" class="button primary" id="hsend-confirm" disabled>Send &amp; start</button>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 <script>
 (function() {
@@ -149,6 +195,246 @@
         alert('Delete failed: ' + e.message);
       }
     });
+  });
+
+  // ----- Send-to-printer modal (history page) -----
+  // Same /api/printers/send endpoint the result page uses; the modal
+  // here picks the printer (rather than having one button per printer
+  // per row) since the actions column is already crowded.
+  const printers = {{ available_printers | default([]) | tojson }};
+  const printerById = new Map(printers.map(p => [p.id, p]));
+  const EXTERNAL_SPOOL = 255;
+  const hmodal = document.getElementById('hsend-modal');
+
+  // State for the open modal — only one is ever open at a time.
+  let pending = null;  // {filename, customer, slicedModel, filaments, printer}
+
+  function normHex(h) { return (h || '').replace('#', '').toUpperCase().slice(0, 6); }
+
+  function flatSlots(printer) {
+    const out = [];
+    (printer.ams_units || []).forEach((unit, ui) => {
+      (unit.slots || []).forEach((s, si) => {
+        out.push({
+          globalIdx: ui * 4 + si,
+          unitLabel: `AMS ${ui + 1}`,
+          slotLabel: `Slot ${si + 1}`,
+          color_hex: s.color_hex || '',
+          type: s.type || '',
+          empty: !s.color_hex && !s.type,
+        });
+      });
+    });
+    return out;
+  }
+
+  function bestSlot(printer, fil) {
+    const target = normHex(fil.color_hex);
+    const exact = flatSlots(printer).filter(s => !s.empty)
+      .find(s => normHex(s.color_hex) === target);
+    return exact ? exact.globalIdx : EXTERNAL_SPOOL;
+  }
+
+  function isCompat(slicedModel, printerModel) {
+    return (slicedModel === 'BL-P001' && printerModel === 'X1C') ||
+           (slicedModel === 'C11'     && printerModel === 'P1S');
+  }
+
+  function renderPrinterPicker() {
+    const container = document.getElementById('hsend-printer-list');
+    container.innerHTML = '';
+    printers.forEach(p => {
+      const compat = !pending.slicedModel || isCompat(pending.slicedModel, p.model);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'button-mini hsend-pick' + (compat ? '' : ' send-btn-warn');
+      btn.dataset.printerId = p.id;
+      btn.disabled = !p.online;
+      btn.textContent = p.label + (compat ? '' : ' ⚠');
+      if (!p.online) btn.title = `${p.label} is offline`;
+      btn.addEventListener('click', () => selectPrinter(p));
+      container.appendChild(btn);
+    });
+  }
+
+  function renderMappingRows(filaments, printer) {
+    const slots = flatSlots(printer);
+    const container = document.getElementById('hsend-mapping-rows');
+    container.innerHTML = '';
+    if (filaments.length === 0) {
+      container.innerHTML = '<p class="hint">No filament metadata in this 3MF — using printer defaults.</p>';
+      return;
+    }
+    filaments.forEach(fil => {
+      const row = document.createElement('div');
+      row.className = 'mapping-row';
+      const swatch = `<span class="swatch-sm" style="background:#${normHex(fil.color_hex) || 'cccccc'}"></span>`;
+      const label  = `<span class="fil-name">Filament ${fil.id}: ${fil.color_name || normHex(fil.color_hex) || '(no colour)'} ${fil.type || ''}</span>`;
+      const sel = document.createElement('select');
+      sel.className = 'mapping-select';
+      sel.dataset.fileFilId = fil.id;
+      slots.forEach(s => {
+        if (s.empty) return;
+        const opt = document.createElement('option');
+        opt.value = String(s.globalIdx);
+        opt.textContent = `${s.unitLabel} ${s.slotLabel} — ${s.type || '?'} (#${normHex(s.color_hex) || '------'})`;
+        sel.appendChild(opt);
+      });
+      const ext = document.createElement('option');
+      ext.value = String(EXTERNAL_SPOOL);
+      const extP = printer.external_spool || {};
+      ext.textContent = (extP.color_hex || extP.type)
+        ? `External spool — ${extP.type || '?'} (#${normHex(extP.color_hex) || '------'})`
+        : 'External spool';
+      sel.appendChild(ext);
+      sel.value = String(bestSlot(printer, fil));
+      row.innerHTML = `<div class="mapping-left">${swatch}${label}</div>`;
+      row.appendChild(sel);
+      container.appendChild(row);
+    });
+  }
+
+  function toggleMappingDisabled(disabled) {
+    document.querySelectorAll('#hsend-mapping-rows select').forEach(sel => sel.disabled = disabled);
+  }
+
+  function selectPrinter(printer) {
+    pending.printer = printer;
+    document.getElementById('hsend-sub').textContent =
+      `${pending.filename} → ${printer.label}` +
+      (pending.customer ? ` (for ${pending.customer})` : '');
+
+    // Build the warning block fresh each time. There can be up to two
+    // independent reasons to warn (file missing, model mismatch); we
+    // concatenate so both are visible if both apply.
+    const warn = document.getElementById('hsend-warn');
+    const parts = [];
+    if (!pending.fileOnDisk) {
+      parts.push(`<p>The 3MF for this order is no longer on disk (it was pruned by retention). ` +
+                 `Reslicing isn't wired up yet, so this send will fail with a 404 — ` +
+                 `re-upload the file via the New Order page if you need to print it.</p>`);
+    }
+    const compat = !pending.slicedModel || isCompat(pending.slicedModel, printer.model);
+    if (!compat) {
+      parts.push(`<p>This file was sliced for <strong>${pending.slicedModel}</strong> ` +
+                 `but ${printer.label} is a ${printer.model}. The firmware will likely refuse — sending anyway.</p>`);
+    }
+    if (parts.length) {
+      warn.style.display = '';
+      warn.innerHTML = parts.join('');
+    } else {
+      warn.style.display = 'none';
+    }
+
+    // Highlight the chosen printer button
+    document.querySelectorAll('.hsend-pick').forEach(b => {
+      b.classList.toggle('primary-done', b.dataset.printerId === printer.id);
+    });
+
+    // Decide AMS-vs-spool intent: requires both (a) the file telling
+    // us its filament list and (b) the printer having loaded AMS
+    // slots. If either is missing, we MUST default the checkbox to
+    // unchecked — otherwise we'd send use_ams=true with no mapping,
+    // and the printer rejects with HMS 0500-0500-0001-0007 ("filament
+    // material/AMS mismatch") because it can't resolve which slot to
+    // pull from. Old records without file_filaments hit this path.
+    const hasAms = (printer.ams_units || []).some(u => (u.slots || []).some(s => s.color_hex || s.type));
+    const wantAms = hasAms && pending.filaments.length > 0;
+    const useAms = document.getElementById('hsend-use-ams');
+    useAms.checked = wantAms;
+    const mapSection = document.getElementById('hsend-mapping-section');
+    if (pending.filaments.length > 0) {
+      mapSection.style.display = '';
+      renderMappingRows(pending.filaments, printer);
+      toggleMappingDisabled(!useAms.checked);
+    } else {
+      mapSection.style.display = 'none';
+    }
+    document.getElementById('hsend-confirm').disabled = false;
+  }
+
+  function openHsend(filename, slicedModel, filaments, customer, fileOnDisk) {
+    pending = { filename, customer, slicedModel, filaments, printer: null, fileOnDisk };
+    document.getElementById('hsend-title').textContent = 'Send to printer';
+    document.getElementById('hsend-sub').textContent = filename + (customer ? ` (for ${customer})` : '');
+    const warn = document.getElementById('hsend-warn');
+    if (!fileOnDisk) {
+      // Surface the missing-file state up-front rather than letting the
+      // user pick a printer + AMS slot only to hit a 404 on submit.
+      warn.style.display = '';
+      warn.innerHTML = `<p>The 3MF for this order is no longer on disk (it was pruned by retention). ` +
+        `Reslicing isn't wired up yet, so this send will fail with a 404 — ` +
+        `re-upload the file via the New Order page if you need to print it.</p>`;
+    } else {
+      warn.style.display = 'none';
+    }
+    document.getElementById('hsend-mapping-section').style.display = 'none';
+    document.getElementById('hsend-confirm').disabled = true;
+    document.getElementById('hsend-confirm').textContent = 'Send & start';
+    renderPrinterPicker();
+    hmodal.style.display = '';
+  }
+
+  function closeHsend() {
+    hmodal.style.display = 'none';
+    pending = null;
+  }
+
+  document.getElementById('hsend-cancel').addEventListener('click', closeHsend);
+  hmodal.addEventListener('click', e => { if (e.target === hmodal) closeHsend(); });
+  document.getElementById('hsend-use-ams').addEventListener('change', e => {
+    toggleMappingDisabled(!e.target.checked);
+  });
+
+  document.querySelectorAll('.history-send-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      let filaments = [];
+      try { filaments = JSON.parse(btn.dataset.fileFilaments || '[]'); } catch (e) {}
+      openHsend(
+        btn.dataset.filename,
+        btn.dataset.slicedModel || '',
+        filaments,
+        btn.dataset.customer || '',
+        btn.dataset.fileOnDisk === '1',
+      );
+    });
+  });
+
+  document.getElementById('hsend-confirm').addEventListener('click', async () => {
+    if (!pending || !pending.printer) return;
+    const useAms = document.getElementById('hsend-use-ams').checked;
+    let mapping = [];
+    if (useAms && pending.filaments.length) {
+      mapping = pending.filaments.map(fil => {
+        const sel = document.querySelector(`#hsend-mapping-rows select[data-file-fil-id="${fil.id}"]`);
+        return parseInt(sel.value, 10);
+      });
+    } else if (pending.filaments.length) {
+      mapping = pending.filaments.map(() => EXTERNAL_SPOOL);
+    }
+
+    const fd = new FormData();
+    fd.append('printer_id', pending.printer.id);
+    fd.append('filename',   pending.filename);
+    fd.append('use_ams',    String(useAms));
+    if (mapping.length) fd.append('ams_mapping', JSON.stringify(mapping));
+
+    const confirmBtn = document.getElementById('hsend-confirm');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Sending…';
+    try {
+      const res = await fetch('/api/printers/send', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const detail = (await res.text()).slice(0, 300);
+        throw new Error(`HTTP ${res.status}: ${detail}`);
+      }
+      confirmBtn.textContent = `✓ Sent to ${pending.printer.label}`;
+      setTimeout(closeHsend, 1500);
+    } catch (e) {
+      alert('Send failed: ' + e.message);
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Send & start';
+    }
   });
 
   // Sync from disk: scan printqueue/work and backfill missing ledger entries.

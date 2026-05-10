@@ -302,8 +302,11 @@
       const hasAms = (pendingPrinter.ams_units || []).some(
         u => (u.slots || []).some(s => s.color_hex || s.type)
       );
-      // Single-filament print + no AMS slots loaded → default to external spool.
-      useAms.checked = hasAms;
+      // Default to AMS only when both sides agree it's possible: the
+      // file declares filaments AND the target printer has loaded AMS
+      // slots. Sending use_ams=true without one or the other yields
+      // HMS 0500-0500-0001-0007 (filament/AMS mismatch).
+      useAms.checked = hasAms && filaments.length > 0;
       document.getElementById('send-mapping-section').style.display =
         filaments.length ? '' : 'none';
       renderMappingRows(pendingOrder, pendingPrinter);

@@ -152,6 +152,19 @@ class _ImplicitFTP_TLS(ftplib.FTP_TLS):
             )
         return conn, size
 
+    def retrbinary(self, cmd, callback, blocksize=8192, rest=None):
+        # Same close_notify-skip pattern as storbinary below — without
+        # this the FTPS download hangs at end-of-transfer waiting for
+        # a TLS shutdown that Bambu never sends.
+        self.voidcmd('TYPE I')
+        with self.transfercmd(cmd, rest) as conn:
+            while 1:
+                data = conn.recv(blocksize)
+                if not data:
+                    break
+                callback(data)
+        return self.voidresp()
+
     def storbinary(self, cmd, fp, blocksize=8192, callback=None, rest=None):
         # Verbatim copy of stdlib FTP_TLS.storbinary minus the trailing
         # `conn.unwrap()` call. Bambu's FTPS server (P1S firmware in
@@ -228,6 +241,44 @@ def _ftps_upload(ip: str, access_code: str, local_path: Path, remote_name: str,
         ftps.set_pasv(True)
         with local_path.open("rb") as f:
             ftps.storbinary(f"STOR {remote_name}", f)
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            try:
+                ftps.close()
+            except Exception:
+                pass
+
+
+def _ftps_download(ip: str, access_code: str, remote_name: str, local_path: Path,
+                   timeout: float = 60.0) -> None:
+    """Pull a file off the printer's FTP root into a local path. Mirror
+    image of _ftps_upload — same SECLEVEL=0 + TLS-1.2 + session-reuse +
+    skip-unwrap workarounds. Used by the grams auto-fetch loop to grab
+    SD-card-print 3MFs that didn't go through our intake so we can
+    extract the slicer's predicted weight.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers("ALL")
+    try:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    except (AttributeError, ValueError):
+        pass
+    ftps = _ImplicitFTP_TLS(timeout=timeout)
+    ftps.context = ctx
+    try:
+        ftps.connect(ip, 990)
+        ftps.login("bblp", access_code)
+        ftps.prot_p()
+        ftps.set_pasv(True)
+        with local_path.open("wb") as f:
+            ftps.retrbinary(f"RETR {remote_name}", f.write)
     finally:
         try:
             ftps.quit()
@@ -527,6 +578,44 @@ class PrinterClient:
         self.state["last_error"] = msg
         self.hub.notify(self.id)
 
+    def claim_external_spool(
+        self,
+        *,
+        tray_type: str = "PLA",
+        tray_color: str = "FFFFFFFFFF"[:8],
+        tray_info_idx: str = "GFL99",
+        nozzle_temp_min: int = 190,
+        nozzle_temp_max: int = 240,
+    ) -> None:
+        """Tell the printer "the external spool is loaded with X" via MQTT.
+
+        Needed for the P1S without AMS: its vt_tray reports
+        tray_color='00000000' (unidentified) when the user just spooled
+        plain filament on the back, and the firmware then refuses every
+        project_file with HMS 0500-0500-0001-0007 ("filament type
+        mismatch"). This command is what Bambu Studio's "Print without
+        AMS" path sends internally — ams_id=255 + tray_id=254 addresses
+        the external spool, tray_info_idx="GFL99" is the generic PLA
+        profile so the firmware doesn't require a brand-specific match.
+        """
+        payload = {
+            "print": {
+                "sequence_id": str(int(_time_mod.time())),
+                "command": "ams_filament_setting",
+                "ams_id": 255,
+                "tray_id": 254,
+                "tray_info_idx": tray_info_idx,
+                "tray_color": tray_color,
+                "tray_type": tray_type,
+                "nozzle_temp_min": nozzle_temp_min,
+                "nozzle_temp_max": nozzle_temp_max,
+                "setting_id": "0",
+            }
+        }
+        if self._client is None:
+            return
+        self._client.publish(self.request_topic, json.dumps(payload), qos=0)
+
     def publish_project_file(
         self,
         remote_filename: str,
@@ -615,6 +704,7 @@ class DashboardHub:
         self.subscribers: set[asyncio.Queue] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        self._grams_fetch_task: asyncio.Task | None = None
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -624,11 +714,129 @@ class DashboardHub:
             client.start()
             client._snapshot_task = loop.create_task(client._snapshot_loop())
             client._reconnect_task = loop.create_task(client._reconnect_watchdog())
+        self._grams_fetch_task = loop.create_task(self._grams_fetch_loop())
 
     def stop(self) -> None:
+        if self._grams_fetch_task is not None:
+            self._grams_fetch_task.cancel()
+            self._grams_fetch_task = None
         for c in self.clients.values():
             c.stop()
         self.clients.clear()
+
+    async def _grams_fetch_loop(self) -> None:
+        """Resolve missing predicted_grams for jobs we couldn't match
+        locally (SD-card prints, Studio sends from another machine, etc.)
+        by FTP-downloading the 3MF from the printer that ran it and
+        running it through inspect_3mf.
+
+        Runs every 60s, processes a small batch per tick. The fetch
+        itself happens on a worker thread so the FTPS handshake doesn't
+        starve the dashboard's MQTT loop. Bambu's storage rotates after
+        a while, so the candidate query already filters out anything
+        last seen more than 24h ago — older missing-grams rows just
+        stay null."""
+        # Slow first cycle so the dashboard finishes its initial
+        # connect+pushall before we start hammering the FTP port.
+        await asyncio.sleep(45)
+        while True:
+            try:
+                await self._grams_fetch_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never let a single tick kill the loop; bad rows are
+                # individually marked "failed" inside the tick.
+                pass
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                raise
+
+    async def _grams_fetch_tick(self) -> None:
+        candidates = jobs_db.find_grams_fetch_candidates(limit=3)
+        for cand in candidates:
+            client = self.clients.get(cand["printer_id"])
+            if client is None:
+                jobs_db.set_grams_fetch_state(cand["id"], "failed")
+                continue
+            try:
+                grams = await asyncio.to_thread(
+                    self._fetch_grams_for, client.cfg, cand["filename"],
+                )
+            except Exception:
+                jobs_db.set_grams_fetch_state(cand["id"], "failed")
+                continue
+            if grams is None or grams <= 0:
+                jobs_db.set_grams_fetch_state(cand["id"], "failed")
+                continue
+            # If the print is already terminal, scale by the latched
+            # final percent so actual_grams gets the same treatment as
+            # the locally-resolved path. In-flight rows defer
+            # actual_grams to the next observation that flips outcome.
+            actual = None
+            if cand.get("outcome") == "finished":
+                actual = round(grams, 1)
+            elif cand.get("outcome") in ("failed", "cancelled"):
+                pct = cand.get("last_percent")
+                if pct is not None:
+                    actual = round(grams * (pct / 100.0), 1)
+            jobs_db.set_grams_fetched(cand["id"], grams, actual_grams=actual)
+
+    @staticmethod
+    def _fetch_grams_for(printer_cfg: dict, filename: str) -> float | None:
+        """Worker-thread half of _grams_fetch_tick. Tries a couple of
+        common naming variations Bambu firmware writes ('foo' vs
+        'foo.3mf' vs 'foo.gcode.3mf') before giving up."""
+        import os as _os
+        import tempfile
+        from slice_order import inspect_3mf  # local: avoids circular import
+
+        # Bambu firmware writes prints as either '<name>.3mf' or
+        # '<name>.gcode.3mf' depending on whether they came from
+        # Studio's "Send to Printer" (project file) or a slicer-output
+        # gcode bundle. The subtask_name we record sometimes has one
+        # form, the actual SD-card file has the other — try every
+        # combination so a 550 on the first attempt isn't fatal.
+        candidates: list[str] = [filename]
+        basename = filename
+        for suffix in (".gcode.3mf", ".3mf"):
+            if basename.endswith(suffix):
+                basename = basename[: -len(suffix)]
+                break
+        for variant in (f"{basename}.gcode.3mf", f"{basename}.3mf", basename):
+            if variant and variant not in candidates:
+                candidates.append(variant)
+
+        last_err: Exception | None = None
+        for name in candidates:
+            fd, tmp = tempfile.mkstemp(suffix=".3mf")
+            _os.close(fd)
+            tmp_path = Path(tmp)
+            try:
+                try:
+                    _ftps_download(
+                        printer_cfg["ip"], printer_cfg["access_code"],
+                        name, tmp_path,
+                    )
+                except Exception as e:
+                    last_err = e
+                    continue
+                ins = inspect_3mf(tmp_path)
+                grams = round(
+                    sum(p.get("weight_grams", 0.0) for p in ins.get("plates", [])),
+                    1,
+                )
+                if grams > 0:
+                    return float(grams)
+            finally:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+        if last_err:
+            raise last_err
+        return None
 
     def notify(self, printer_id: str) -> None:
         if self.loop is None:
@@ -730,9 +938,29 @@ class DashboardHub:
             raise HTTPException(404, f"file not found: {local_path.name}")
         remote = remote_name or local_path.name
 
+        # Decide whether to pre-claim the external spool. P1S without
+        # AMS shows up here as ams_units=[] AND vt_tray.tray_color='00000000'
+        # when filament has been spooled on the back without telling
+        # the printer what it is. In that state every project_file
+        # gets rejected with HMS 0500-0500-0001-0007 — the only
+        # workaround is to MQTT-publish ams_filament_setting first so
+        # the firmware has *something* to compare against. We only do
+        # it for use_ams=False (external-spool prints) and only when
+        # the spool currently reports "unidentified", to avoid
+        # clobbering a setting the user actually configured.
+        report = (client.state.get("report") or {}).get("print") or {}
+        vt = report.get("vt_tray") or {}
+        spool_unidentified = (vt.get("tray_color") or "").strip("0") == ""
+        will_claim_spool = (not use_ams) and spool_unidentified
+
         def _work() -> None:
             _ftps_upload(client.cfg["ip"], client.cfg["access_code"],
                          local_path, remote)
+            if will_claim_spool:
+                client.claim_external_spool()
+                # Give the firmware a moment to ingest the new tray
+                # info before the project_file pre-print check fires.
+                _time_mod.sleep(0.5)
             client.publish_project_file(
                 remote, use_ams=use_ams, ams_mapping=ams_mapping,
             )
@@ -857,6 +1085,35 @@ async def api_jobs(
         ),
         "stats": jobs_db.stats(),
     }
+
+
+@router.delete("/api/jobs/{job_id}")
+async def api_jobs_delete(job_id: int) -> dict:
+    """Drop a job row from jobs.db. The MQTT observer may re-create
+    the row on the next report frame if the same (printer_id, task_id)
+    is still active — for cleaning up ghost / false-start entries
+    delete after the print has actually ended."""
+    try:
+        return jobs_db.delete_job(job_id)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/api/jobs/{job_id}")
+async def api_jobs_update(job_id: int, request: Request) -> dict:
+    """Patch editable fields on a single job row. Body is JSON
+    `{field: value, ...}` — see jobs_db._EDITABLE_FIELDS for the
+    whitelist. Setting is_manually_edited=1 (handled inside
+    update_job) makes the MQTT observer back off, so the staff
+    correction sticks across restarts and report frames."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "expected JSON body")
+    try:
+        return jobs_db.update_job(job_id, body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.get("/jobs", response_class=HTMLResponse)
