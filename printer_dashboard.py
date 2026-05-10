@@ -15,11 +15,14 @@ re-renders tiles as state changes.
 from __future__ import annotations
 
 import asyncio
+import ftplib
 import json
 import re
+import socket
 import ssl
 import subprocess
 import threading
+import time as _time_mod
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -27,7 +30,7 @@ from urllib.parse import quote
 
 import imageio_ffmpeg
 import paho.mqtt.client as mqtt
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 
@@ -94,6 +97,143 @@ def _grab_snapshot(ip: str, access_code: str, timeout: float = 12.0) -> bytes:
     if proc.stdout[:3] != b"\xff\xd8\xff":
         raise IOError("ffmpeg returned non-JPEG output")
     return proc.stdout
+
+
+class _ImplicitFTP_TLS(ftplib.FTP_TLS):
+    """FTPS in implicit-TLS mode (port 990, TLS from the first byte).
+
+    Bambu printers expose FTPS implicitly — there's no plaintext AUTH TLS
+    handshake. Python's stdlib only ships explicit-TLS support, so we wrap
+    the control socket in SSL on connect. Self-signed cert; verification
+    is disabled by the caller (same posture as the MQTT and RTSPS paths).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._sock = None
+
+    @property
+    def sock(self):
+        return self._sock
+
+    @sock.setter
+    def sock(self, value):
+        if value is not None and not isinstance(value, ssl.SSLSocket):
+            value = self.context.wrap_socket(value)
+        self._sock = value
+
+    def makepasv(self):
+        # Bambu printers report their internal LAN address in the PASV
+        # response. When the printer is on a different subnet (or the
+        # firmware is just buggy about this), the IP it returns isn't
+        # routable from the host, so the data-channel connect hangs
+        # until the socket timeout fires. Force the data channel to use
+        # the same IP we already reached the control channel on.
+        _host, port = super().makepasv()
+        return self.host, port
+
+    def ntransfercmd(self, cmd, rest=None):
+        # Bambu's FTPS server requires the data-channel TLS to resume
+        # the session negotiated on the control channel. Python's
+        # default ftplib opens a fresh TLS handshake on the data port,
+        # which Bambu refuses with an immediate EOF (looks like
+        # "EOF occurred in violation of protocol (_ssl.c:2427)" to the
+        # client). Reusing the control socket's SSLSession satisfies
+        # the printer.
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if self._prot_p:
+            session = getattr(self.sock, "session", None)
+            conn = self.context.wrap_socket(
+                conn,
+                server_hostname=self.host,
+                session=session,
+            )
+        return conn, size
+
+    def storbinary(self, cmd, fp, blocksize=8192, callback=None, rest=None):
+        # Verbatim copy of stdlib FTP_TLS.storbinary minus the trailing
+        # `conn.unwrap()` call. Bambu's FTPS server (P1S firmware in
+        # particular) sends `226 Transfer complete` on the control
+        # channel as soon as it sees the data socket close, but never
+        # sends a TLS close_notify on the data channel. Python's
+        # default unwrap() blocks waiting for that close_notify until
+        # the socket timeout fires — the upload appears to "hang" even
+        # though every byte was already received. Letting the socket
+        # close on context-manager exit (no unwrap) is what every
+        # working community Bambu FTPS client does.
+        self.voidcmd('TYPE I')
+        with self.transfercmd(cmd, rest) as conn:
+            while 1:
+                buf = fp.read(blocksize)
+                if not buf:
+                    break
+                conn.sendall(buf)
+                if callback is not None:
+                    callback(buf)
+        return self.voidresp()
+
+
+def _ftps_upload(ip: str, access_code: str, local_path: Path, remote_name: str,
+                 timeout: float = 120.0) -> None:
+    """Upload a single file to a Bambu printer via implicit FTPS.
+
+    Lands at the FTP root, which on X1C maps to the SD card and on P1S to
+    internal storage — either way the firmware's project_file command can
+    address the file by name. Raises on any FTP error so the caller can
+    surface a useful message.
+
+    The SSL context drops to SECLEVEL=0 because Bambu's embedded FTPS
+    server uses weak crypto (small DH params / legacy ciphers) that
+    modern OpenSSL builds refuse by default — without this, the TLS
+    handshake closes mid-stream with "EOF occurred in violation of
+    protocol (_ssl.c:...)". cert verification is already off (self-signed
+    cert), so loosening the cipher floor doesn't widen the trust surface
+    further than it already is.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+    except ssl.SSLError:
+        # Older Python / OpenSSL builds parse SECLEVEL differently —
+        # fall back to "everything we can negotiate".
+        ctx.set_ciphers("ALL")
+    # Pin to TLS 1.2 so the data-channel session-reuse trick actually works.
+    # P1S firmware negotiates TLS 1.3 on the control channel by default in
+    # Python 3.12+, but Python's TLS 1.3 ticket isn't available at the
+    # moment ntransfercmd() needs it — `self.sock.session` reads back as
+    # None and the data-channel TLS opens a fresh handshake that the
+    # printer ignores, hanging the STOR mid-transfer. TLS 1.2 emits a
+    # session ticket immediately on handshake completion, so resumption
+    # works and the data channel comes up. (X1C tolerates either; P1S
+    # needs this.)
+    try:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    except (AttributeError, ValueError):
+        pass
+    ftps = _ImplicitFTP_TLS(timeout=timeout)
+    ftps.context = ctx
+    # Verbose FTP conversation goes to stderr (uvicorn.err.log) so we can
+    # see exactly which command times out on the slower P1S firmware.
+    ftps.set_debuglevel(2)
+    try:
+        ftps.connect(ip, 990)
+        ftps.login("bblp", access_code)
+        # Encrypt the data channel too — the printer enforces this and will
+        # reject a plain-text STOR.
+        ftps.prot_p()
+        ftps.set_pasv(True)
+        with local_path.open("rb") as f:
+            ftps.storbinary(f"STOR {remote_name}", f)
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            try:
+                ftps.close()
+            except Exception:
+                pass
 
 
 def _deep_merge(dst: dict, src: dict) -> None:
@@ -358,6 +498,82 @@ class PrinterClient:
         self.state["last_error"] = msg
         self.hub.notify(self.id)
 
+    def publish_project_file(
+        self,
+        remote_filename: str,
+        *,
+        use_ams: bool = False,
+        ams_mapping: list[int] | None = None,
+    ) -> None:
+        """Tell the printer to start printing a file already uploaded to its
+        FTP root. Reuses the dashboard's persistent MQTT client to avoid
+        Bambu's single-client-per-credentials kick — a one-shot publish
+        with the same credentials would knock the dashboard offline.
+
+        `ams_mapping` positions follow the file's filament index (0-based)
+        and the values are AMS slot indices (0-3 for the first AMS unit,
+        4-7 for the second, etc.). The sentinel value 255 (0xff) means
+        "external spool" (the back tray, vt_tray) — that's the firmware's
+        own magic number, not ours. When `use_ams=False` and the mapping
+        is omitted, the printer falls back to whatever filament is loaded
+        on the external spool.
+
+        The payload is the project_file command shape that Bambu Studio /
+        Handy send when invoking Send-to-Printer; the field set is the
+        cross-printer subset confirmed working on X1C and P1S in the
+        OpenBambuAPI / pybambu community ports.
+        """
+        if self._client is None or not self.state.get("online"):
+            raise RuntimeError(f"printer '{self.id}' is offline")
+        # ams_mapping is sent as a JSON-string-encoded array, not a real
+        # JSON array — Bambu's parser is picky about this.
+        mapping_str = json.dumps(ams_mapping) if ams_mapping else ""
+        # `file:///mnt/sdcard/<name>` is the URL form Bambu Studio itself
+        # publishes for LAN-mode "Send to Printer". The FTP root we
+        # uploaded to maps to /mnt/sdcard/ on both X1C and P1S firmware.
+        # The `ftp:///<name>` form is also documented in the wild but
+        # P1S firmware silently ignores it — the printer latches the
+        # subtask_name but the print never starts (gcode_state stays
+        # FINISH, gcode_file stays empty).
+        payload = {
+            "print": {
+                "sequence_id": str(int(_time_mod.time())),
+                "command": "project_file",
+                "param": "Metadata/plate_1.gcode",
+                "subtask_name": remote_filename.rsplit(".3mf", 1)[0],
+                "url": f"file:///mnt/sdcard/{remote_filename}",
+                "md5": "",
+                "bed_type": "auto",
+                "bed_levelling": True,
+                "flow_cali": False,
+                "vibration_cali": True,
+                "layer_inspect": False,
+                "use_ams": bool(use_ams),
+                "timelapse": False,
+                "ams_mapping": mapping_str,
+                "profile_id": "0",
+                "project_id": "0",
+                "subtask_id": "0",
+                "task_id": "0",
+            },
+            "user_id": "1",
+        }
+        # QoS 0 to match the rest of the dashboard's traffic. Bambu's broker
+        # doesn't reliably PUBACK at QoS 1 — the dashboard's pushall on
+        # connect already uses qos=0 for the same reason. paho's
+        # is_published() returns True for QoS-0 as soon as the message is
+        # handed to the network loop, so the wait_for_publish guard below
+        # is a sanity check rather than a real ack.
+        info = self._client.publish(
+            self.request_topic, json.dumps(payload), qos=0,
+        )
+        try:
+            info.wait_for_publish(timeout=5.0)
+        except (ValueError, RuntimeError):
+            pass
+        if not info.is_published():
+            raise RuntimeError("MQTT publish did not complete within 5s")
+
 
 class DashboardHub:
     """Owns the printer clients + the set of subscribed WebSockets.
@@ -426,6 +642,88 @@ class DashboardHub:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self.subscribers.discard(q)
 
+    def list_printers(self) -> list[dict]:
+        """Compact catalogue used by the result page to render send-to-printer
+        controls. Returns id/label/model + online state + the printer's live
+        AMS / external-spool palette so the UI can populate per-filament slot
+        pickers without a follow-up query."""
+        with self._lock:
+            out = []
+            for c in self.clients.values():
+                p = (c.state.get("report") or {}).get("print") or {}
+                ams_units: list[dict] = []
+                ams_root = (p.get("ams") or {}).get("ams") or []
+                for unit in ams_root:
+                    if not isinstance(unit, dict):
+                        continue
+                    slots = []
+                    for tray in unit.get("tray") or []:
+                        if not isinstance(tray, dict):
+                            continue
+                        slots.append({
+                            "id": str(tray.get("id", "")),
+                            # tray_color is RGBA hex (8 chars) when set; empty
+                            # when the slot is unloaded.
+                            "color_hex": (tray.get("tray_color") or "").strip(),
+                            "type": (tray.get("tray_type") or "").strip(),
+                        })
+                    ams_units.append({
+                        "id": str(unit.get("id", "")),
+                        "slots": slots,
+                    })
+                vt = p.get("vt_tray") or {}
+                external_spool = {
+                    "color_hex": (vt.get("tray_color") or "").strip(),
+                    "type": (vt.get("tray_type") or "").strip(),
+                }
+                out.append({
+                    "id": c.id,
+                    "label": c.cfg.get("label", c.id),
+                    "model": (c.cfg.get("model") or "").upper(),
+                    "online": bool(c.state.get("online")),
+                    "ams_units": ams_units,
+                    "external_spool": external_spool,
+                })
+            return out
+
+    async def send_to_printer(self, printer_id: str, local_path: Path,
+                              remote_name: str | None = None,
+                              *,
+                              use_ams: bool = False,
+                              ams_mapping: list[int] | None = None) -> dict:
+        """Upload a 3MF over FTPS and start the print via MQTT. Both legs run
+        on a worker thread; the FTP transfer dominates the wall time (a
+        ~30 MB 3MF takes ~3-5s over Wi-Fi)."""
+        client = self.clients.get(printer_id)
+        if client is None:
+            raise HTTPException(404, f"unknown printer '{printer_id}'")
+        if not local_path.exists() or not local_path.is_file():
+            raise HTTPException(404, f"file not found: {local_path.name}")
+        remote = remote_name or local_path.name
+
+        def _work() -> None:
+            _ftps_upload(client.cfg["ip"], client.cfg["access_code"],
+                         local_path, remote)
+            client.publish_project_file(
+                remote, use_ams=use_ams, ams_mapping=ams_mapping,
+            )
+
+        try:
+            await asyncio.to_thread(_work)
+        except ftplib.all_errors as e:
+            raise HTTPException(502, f"FTPS upload failed: {e}")
+        except (socket.timeout, ConnectionError, OSError) as e:
+            raise HTTPException(502, f"network error talking to printer: {e}")
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+
+        return {
+            "ok": True,
+            "printer_id": printer_id,
+            "label": client.cfg.get("label", printer_id),
+            "filename": remote,
+        }
+
 
 hub = DashboardHub()
 
@@ -455,6 +753,55 @@ async def snapshot(printer_id: str) -> FileResponse:
         path,
         media_type="image/jpeg",
         headers={"Cache-Control": "no-store, must-revalidate"},
+    )
+
+
+@router.get("/api/printers/list")
+async def api_printers_list() -> dict:
+    """Lightweight printer catalogue (id, label, model, online) for the
+    result page's send-to-printer controls. Distinct from /api/printers,
+    which dumps the full live state for the dashboard."""
+    return {"printers": hub.list_printers()}
+
+
+@router.post("/api/printers/send")
+async def api_printers_send(
+    printer_id: str = Form(...),
+    filename: str = Form(...),
+    use_ams: str = Form("false"),
+    # JSON-encoded array of slot indices, positionally matching the file's
+    # filaments (e.g. `[0,2]` = filament 1 → AMS slot 0, filament 2 → slot 2).
+    # The sentinel 255 means "external spool" (vt_tray).
+    ams_mapping: str = Form(""),
+) -> dict:
+    """FTPS-upload the named 3MF (under printqueue/work) to the requested
+    printer and immediately publish a project_file MQTT command so the
+    print starts without staff touching the printer's screen."""
+    if not _ID_RE.match(printer_id):
+        raise HTTPException(400, "bad printer id")
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "bad filename")
+    if not filename.lower().endswith(".3mf"):
+        raise HTTPException(400, "expected a .3mf file")
+    work_dir = BASE_DIR / "printqueue" / "work"
+    local = (work_dir / filename).resolve()
+    if not str(local).startswith(str(work_dir.resolve())):
+        raise HTTPException(400, "path escapes workdir")
+
+    mapping: list[int] | None = None
+    if ams_mapping.strip():
+        try:
+            parsed = json.loads(ams_mapping)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "ams_mapping must be a JSON array")
+        if not isinstance(parsed, list) or not all(isinstance(x, int) for x in parsed):
+            raise HTTPException(400, "ams_mapping must be a JSON array of ints")
+        mapping = parsed
+
+    return await hub.send_to_printer(
+        printer_id, local,
+        use_ams=str(use_ams).lower() in ("1", "true", "yes", "on"),
+        ams_mapping=mapping,
     )
 
 

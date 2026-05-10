@@ -23,6 +23,12 @@
   </dl>
 
   {% for order in orders %}
+    {# Capture the outer-loop index so the inner printer loop's data-* attrs
+       reference the correct order — Jinja's `loop` variable is shadowed by
+       the inner `{% for p in available_printers %}` and otherwise yields
+       the printer index, which broke openModal() for any printer past the
+       first when there's only one order. #}
+    {% set order_idx = loop.index0 %}
     <div class="order-block">
       <h3>{{ order.filename }}</h3>
 
@@ -73,8 +79,60 @@
                 data-order-idx="{{ loop.index0 }}">Print receipt</button>
       </div>
       <div class="receipt-status" data-status-idx="{{ loop.index0 }}"></div>
+
+      {% if available_printers %}
+      <div class="send-to-printer">
+        <span class="send-label">Send to printer:</span>
+        {% for p in available_printers %}
+          {# Compatibility = sliced model_id matches printer model. BL-P001 is X1C, C11 is P1S. #}
+          {% set is_compat = (
+            (order.printer_model_id == 'BL-P001' and p.model == 'X1C') or
+            (order.printer_model_id == 'C11'    and p.model == 'P1S')
+          ) %}
+          <button type="button"
+                  class="button-mini send-btn{% if not is_compat %} send-btn-warn{% endif %}"
+                  data-order-idx="{{ order_idx }}"
+                  data-printer-id="{{ p.id }}"
+                  data-compat="{{ '1' if is_compat else '0' }}"
+                  {% if not p.online %}disabled title="{{ p.label }} is offline"{% endif %}>
+            {{ p.label }}{% if not is_compat %} ⚠{% endif %}
+          </button>
+        {% endfor %}
+      </div>
+      <div class="send-status" data-send-idx="{{ loop.index0 }}"></div>
+      {% endif %}
     </div>
   {% endfor %}
+
+{% if available_printers %}
+<div id="send-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="send-modal-title">
+    <h3 id="send-modal-title">Send to printer</h3>
+    <p class="modal-sub" id="send-modal-sub"></p>
+    <div id="send-modal-warn" class="warning" style="display:none;"></div>
+
+    <div class="modal-section">
+      <label class="ams-toggle">
+        <input type="checkbox" id="send-use-ams" checked>
+        Use AMS (uncheck to print from the external spool only)
+      </label>
+    </div>
+
+    <div class="modal-section" id="send-mapping-section">
+      <h4>Filament mapping</h4>
+      <p class="hint">Pick which AMS slot supplies each filament in the file.
+        Slots that don't match the file's colour exactly will still print —
+        the printer doesn't enforce colour, just slot index.</p>
+      <div id="send-mapping-rows"></div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="button secondary" id="send-modal-cancel">Cancel</button>
+      <button type="button" class="button primary" id="send-modal-confirm">Send & start</button>
+    </div>
+  </div>
+</div>
+{% endif %}
 
   <div class="actions">
     {% if is_multi %}
@@ -122,6 +180,236 @@
 
     document.querySelectorAll('.print-receipt-btn').forEach(btn => {
       btn.addEventListener('click', () => printReceipt(parseInt(btn.dataset.orderIdx, 10)));
+    });
+
+    const printers = {{ available_printers | default([]) | tojson }};
+    const printerById = new Map(printers.map(p => [p.id, p]));
+
+    // Bambu's firmware doesn't enforce colour matching — `ams_mapping`
+    // is purely positional. We compute a "best slot" suggestion just to
+    // pre-select something sensible: exact hex match wins, otherwise we
+    // fall back to the external spool (sentinel 255 = 0xff in firmware).
+    const EXTERNAL_SPOOL = 255;
+
+    function normHex(h) {
+      // tray_color is RGBA ("FFFFFFFF"); file colour is RGB ("FFFFFF").
+      // Compare on the leading 6 chars, uppercased, no '#'.
+      return (h || '').replace('#', '').toUpperCase().slice(0, 6);
+    }
+
+    function flatSlots(printer) {
+      // Flatten ams_units into a single list, slot index = unit_idx*4 + slot_idx
+      // (Bambu firmware's encoding: a second AMS would use 4..7, etc.).
+      const out = [];
+      (printer.ams_units || []).forEach((unit, ui) => {
+        (unit.slots || []).forEach((s, si) => {
+          out.push({
+            globalIdx: ui * 4 + si,
+            unitLabel: `AMS ${ui + 1}`,
+            slotLabel: `Slot ${si + 1}`,
+            color_hex: s.color_hex || '',
+            type: s.type || '',
+            empty: !s.color_hex && !s.type,
+          });
+        });
+      });
+      return out;
+    }
+
+    function bestSlot(printer, fileFil) {
+      const target = normHex(fileFil.color_hex);
+      const slots = flatSlots(printer).filter(s => !s.empty);
+      const exact = slots.find(s => normHex(s.color_hex) === target);
+      if (exact) return exact.globalIdx;
+      return EXTERNAL_SPOOL;
+    }
+
+    function renderMappingRows(order, printer) {
+      const filaments = order.file_filaments || [];
+      const slots = flatSlots(printer);
+      const container = document.getElementById('send-mapping-rows');
+      container.innerHTML = '';
+
+      if (filaments.length === 0) {
+        container.innerHTML = '<p class="hint">No filaments declared in this 3MF — using printer defaults.</p>';
+        return;
+      }
+
+      filaments.forEach((fil, i) => {
+        const row = document.createElement('div');
+        row.className = 'mapping-row';
+        const swatch = `<span class="swatch-sm" style="background:#${normHex(fil.color_hex) || 'cccccc'}"></span>`;
+        const label  = `<span class="fil-name">Filament ${fil.id}: ${fil.color_name || normHex(fil.color_hex) || '(no colour)'} ${fil.type || ''}</span>`;
+        const select = document.createElement('select');
+        select.className = 'mapping-select';
+        select.dataset.fileFilId = fil.id;
+
+        slots.forEach(s => {
+          if (s.empty) return;
+          const opt = document.createElement('option');
+          opt.value = String(s.globalIdx);
+          opt.textContent = `${s.unitLabel} ${s.slotLabel} — ${s.type || '?'} (#${normHex(s.color_hex) || '------'})`;
+          select.appendChild(opt);
+        });
+
+        const ext = document.createElement('option');
+        ext.value = String(EXTERNAL_SPOOL);
+        const extP = printer.external_spool || {};
+        const extLabel = (extP.color_hex || extP.type)
+          ? `External spool — ${extP.type || '?'} (#${normHex(extP.color_hex) || '------'})`
+          : 'External spool';
+        ext.textContent = extLabel;
+        select.appendChild(ext);
+
+        select.value = String(bestSlot(printer, fil));
+
+        row.innerHTML = `<div class="mapping-left">${swatch}${label}</div>`;
+        row.appendChild(select);
+        container.appendChild(row);
+      });
+    }
+
+    // Modal state — orderIdx + printerId of the currently-open send dialog.
+    const modal = document.getElementById('send-modal');
+    let pendingBtn = null;
+    let pendingOrder = null;
+    let pendingPrinter = null;
+
+    function openModal(orderIdx, printerId, compat) {
+      pendingOrder = orders[orderIdx];
+      pendingPrinter = printerById.get(printerId);
+      if (!pendingOrder || !pendingPrinter) return;
+      pendingBtn = document.querySelector(
+        `.send-btn[data-order-idx="${orderIdx}"][data-printer-id="${printerId}"]`
+      );
+      document.getElementById('send-modal-title').textContent =
+        `Send to ${pendingPrinter.label}`;
+      document.getElementById('send-modal-sub').textContent =
+        `${pendingOrder.filename} — print starts immediately after upload.`;
+
+      const warn = document.getElementById('send-modal-warn');
+      if (!compat) {
+        warn.style.display = '';
+        warn.innerHTML = `<p>This file was sliced for <strong>${pendingOrder.printer_model_id || 'an unknown model'}</strong> ` +
+          `but ${pendingPrinter.label} is a ${pendingPrinter.model}. ` +
+          `The firmware will likely refuse the job — sending anyway.</p>`;
+      } else {
+        warn.style.display = 'none';
+      }
+
+      const useAms = document.getElementById('send-use-ams');
+      const filaments = pendingOrder.file_filaments || [];
+      const hasAms = (pendingPrinter.ams_units || []).some(
+        u => (u.slots || []).some(s => s.color_hex || s.type)
+      );
+      // Single-filament print + no AMS slots loaded → default to external spool.
+      useAms.checked = hasAms;
+      document.getElementById('send-mapping-section').style.display =
+        filaments.length ? '' : 'none';
+      renderMappingRows(pendingOrder, pendingPrinter);
+      toggleMappingDisabled(!useAms.checked);
+
+      modal.style.display = '';
+    }
+
+    function closeModal() {
+      modal.style.display = 'none';
+      pendingBtn = null;
+      pendingOrder = null;
+      pendingPrinter = null;
+    }
+
+    function toggleMappingDisabled(disabled) {
+      document.querySelectorAll('#send-mapping-rows select').forEach(sel => {
+        sel.disabled = disabled;
+      });
+    }
+
+    document.getElementById('send-use-ams').addEventListener('change', e => {
+      toggleMappingDisabled(!e.target.checked);
+    });
+
+    document.getElementById('send-modal-cancel').addEventListener('click', closeModal);
+    modal.addEventListener('click', e => {
+      // Click on the backdrop (but not the inner card) closes.
+      if (e.target === modal) closeModal();
+    });
+
+    document.querySelectorAll('.send-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.orderIdx, 10);
+        const printerId = btn.dataset.printerId;
+        const compat = btn.dataset.compat === '1';
+        openModal(idx, printerId, compat);
+      });
+    });
+
+    document.getElementById('send-modal-confirm').addEventListener('click', async () => {
+      if (!pendingBtn || !pendingOrder || !pendingPrinter) return;
+
+      const idx       = pendingBtn.dataset.orderIdx;
+      // Tolerate a missing status div — the fetch should still go out even
+      // if the inline status banner can't be located.
+      const status    = document.querySelector(`.send-status[data-send-idx="${idx}"]`)
+                        || { className: '', textContent: '' };
+      const useAms    = document.getElementById('send-use-ams').checked;
+      const filaments = pendingOrder.file_filaments || [];
+
+      let mapping = [];
+      if (useAms && filaments.length) {
+        mapping = filaments.map(fil => {
+          const sel = document.querySelector(
+            `#send-mapping-rows select[data-file-fil-id="${fil.id}"]`
+          );
+          return parseInt(sel.value, 10);
+        });
+      } else if (filaments.length) {
+        // use_ams=false but the file declares filaments — point them all at
+        // the external spool so the mapping is well-formed.
+        mapping = filaments.map(() => EXTERNAL_SPOOL);
+      }
+
+      const original = pendingBtn.textContent;
+      pendingBtn.disabled = true;
+      pendingBtn.textContent = 'Sending…';
+      status.className = 'send-status';
+      status.textContent = '';
+      const printerLabel = pendingPrinter.label;
+      const filename = pendingOrder.filename;
+      const printerId = pendingPrinter.id;
+      closeModal();
+
+      const fd = new FormData();
+      fd.append('printer_id', printerId);
+      fd.append('filename',   filename);
+      fd.append('use_ams',    String(useAms));
+      if (mapping.length) fd.append('ams_mapping', JSON.stringify(mapping));
+
+      const btn = document.querySelector(
+        `.send-btn[data-order-idx="${idx}"][data-printer-id="${printerId}"]`
+      );
+
+      try {
+        const res = await fetch('/api/printers/send', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const detail = (await res.text()).slice(0, 300);
+          throw new Error(`HTTP ${res.status}: ${detail}`);
+        }
+        if (btn) {
+          btn.textContent = `✓ Sent to ${printerLabel}`;
+          btn.classList.remove('send-btn-warn');
+          btn.classList.add('primary-done');
+        }
+        status.className = 'success-msg';
+        status.textContent = `Print started on ${printerLabel}.`;
+      } catch (e) {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = original;
+        }
+        status.className = 'error-msg';
+        status.textContent = 'Send failed: ' + e.message;
+      }
     });
 
     const printAllBtn = document.getElementById('print-all-btn');

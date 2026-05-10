@@ -40,6 +40,7 @@ sys.path.insert(0, str(BASE_DIR))
 # calls so each invocation gets a fresh interpreter.
 from slice_order import (  # noqa: E402
     _fmt_date_dom, _merge_3mfs, _make_printable, _strip_to_print_file,
+    read_printer_model_id,
     PRINTERS, DEFAULT_PRINTER,
 )
 from email_parser import OLLAMA_MODEL, OLLAMA_URL, parse_email  # noqa: E402
@@ -395,10 +396,36 @@ def _build_record(
     plates = inspection["plates"]
     total_time = sum(p.get("prediction_seconds", 0) for p in plates)
     total_mass = round(sum(p.get("weight_grams", 0.0) for p in plates), 1)
+    # Authoritative source for "what physical printer can this 3MF run on?"
+    # — the import flow can't trust the user-selected `printer` param since
+    # the file came pre-sliced.
+    model_id = read_printer_model_id(output_3mf) or ""
+
+    # Union the per-plate filament lists into a single file-level palette.
+    # `id` is the 1-based filament index in the 3MF — what `ams_mapping`
+    # entries are positioned by. We dedupe by id so a multi-plate file that
+    # re-uses the same filament across plates only asks the user once.
+    seen_ids: set[str] = set()
+    file_filaments: list[dict] = []
+    for plate in plates:
+        for fil in plate.get("filaments", []) or []:
+            fid = str(fil.get("slot") or "")
+            if not fid or fid in seen_ids:
+                continue
+            seen_ids.add(fid)
+            file_filaments.append({
+                "id": fid,
+                "type": fil.get("type", ""),
+                "color_hex": fil.get("color_hex", ""),
+                "color_name": fil.get("color_name", ""),
+            })
+    file_filaments.sort(key=lambda f: int(f["id"]) if f["id"].isdigit() else 999)
+
     return {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "flow": flow,
         "printer": printer,
+        "printer_model_id": model_id,
         "customer": customer,
         "card": card,
         "colors": colors,
@@ -411,6 +438,7 @@ def _build_record(
         "price_cad": round(total_mass * PRICE_PER_GRAM, 2),
         "any_over_5h": any(p.get("prediction_seconds", 0) > 5 * 3600 for p in plates),
         "any_outside_bed": any(p.get("outside", False) for p in plates),
+        "file_filaments": file_filaments,
         "plates": [
             {
                 "plate": p.get("plate"),
@@ -690,7 +718,12 @@ async def submit(
     }
     if format.lower() == "json":
         return JSONResponse(payload)
-    return templates.TemplateResponse(request, "result.html", payload)
+    # Inject the live printer roster so result.html can render send-to-printer
+    # controls without a follow-up XHR.
+    return templates.TemplateResponse(request, "result.html", {
+        **payload,
+        "available_printers": printer_hub.list_printers(),
+    })
 
 
 @app.post("/receipt")

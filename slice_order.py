@@ -738,6 +738,27 @@ def _list_3mf_members(src: Path) -> list[str]:
         return z.namelist()
 
 
+def read_printer_model_id(path: Path) -> str | None:
+    """Pull the printer_model_id (e.g. "BL-P001" for X1C, "C11" for P1S) out of
+    a 3MF's slice_info.config. Returns None if the file isn't a sliced 3MF or
+    the metadata is missing. Used by the web app's send-to-printer flow to
+    decide which physical printers a given file is compatible with."""
+    si_bytes = _read_3mf_member(path, "Metadata/slice_info.config")
+    if not si_bytes:
+        return None
+    try:
+        root = ET.fromstring(si_bytes)
+    except ET.ParseError:
+        return None
+    for plate in root.findall("plate"):
+        for meta in plate.findall("metadata"):
+            if meta.get("key") == "printer_model_id":
+                v = (meta.get("value") or "").strip()
+                if v:
+                    return v
+    return None
+
+
 def inspect_3mf(path: Path) -> dict:
     """Return structured placement + slicing info for every plate in a 3MF.
 

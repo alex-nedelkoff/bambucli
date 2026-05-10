@@ -519,3 +519,91 @@ table.uploads .inspecting-cell {
 }
 .order-stats strong { color: var(--text); }
 .receipt-status { margin: 10px 0 0; font-size: 13px; }
+
+.send-to-printer {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.send-to-printer .send-label {
+  font-size: 13px;
+  color: var(--muted);
+  margin-right: 4px;
+}
+.send-to-printer .send-btn { padding: 6px 12px; font-size: 13px; }
+.send-to-printer .send-btn-warn {
+  border-color: #c98a00;
+  background: #fff7e0;
+  color: #6b4500;
+}
+.send-status { margin: 8px 0 0; font-size: 13px; }
+
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  background: white;
+  border-radius: 8px;
+  padding: 22px 24px;
+  max-width: 520px;
+  width: calc(100% - 32px);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.modal-card h3 { margin: 0 0 4px; color: var(--navy); }
+.modal-card h4 { margin: 0 0 6px; font-size: 14px; color: var(--navy); }
+.modal-sub { font-size: 13px; color: var(--muted); margin: 0 0 14px; }
+.modal-card .hint {
+  font-size: 12px; color: var(--muted);
+  margin: 4px 0 10px; line-height: 1.4;
+}
+.modal-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.modal-section:first-of-type { border-top: none; padding-top: 4px; }
+.modal-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  margin-top: 18px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.ams-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; cursor: pointer;
+}
+.mapping-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.mapping-row:last-child { border-bottom: none; }
+.mapping-left {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px;
+}
+.swatch-sm {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mapping-select {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+  max-width: 60%;
+}
+.mapping-select:disabled { opacity: 0.5; }
