@@ -179,6 +179,36 @@ def _grab_snapshot_p1(ip: str, access_code: str, timeout: float = 12.0) -> bytes
     return jpeg
 
 
+def _send_close_notify_best_effort(conn: ssl.SSLSocket) -> None:
+    """Send our TLS close_notify alert on the data channel without
+    blocking on the server's reply.
+
+    OpenSSL's `SSL_shutdown` is two-stage: stage 1 writes our
+    close_notify (fast, just a socket send); stage 2 reads the peer's
+    close_notify. Python's `SSLSocket.unwrap()` runs both stages
+    blocking. X1C vsftpd refuses uploads with "426 Failure reading
+    network stream" if stage 1 doesn't happen — but P1S firmware
+    never replies in stage 2, so a plain unwrap() hangs there until
+    the socket timeout fires. Lowering the data socket's timeout
+    around the unwrap call lets stage 1 finish on both, while
+    bounding the P1S stall to a few hundred ms.
+    """
+    try:
+        conn.settimeout(0.5)
+    except OSError:
+        # Socket already in a bad state — skip; the worst case is
+        # the server reports 426 on this transfer. Don't make it
+        # worse by raising.
+        return
+    try:
+        conn.unwrap()
+    except (ssl.SSLError, OSError):
+        # P1S: TimeoutError once close_notify has been sent. X1C
+        # under bad conditions: SSLError. Either way our half of the
+        # shutdown is on the wire by the time these raise.
+        pass
+
+
 class _ImplicitFTP_TLS(ftplib.FTP_TLS):
     """FTPS in implicit-TLS mode (port 990, TLS from the first byte).
 
@@ -231,9 +261,7 @@ class _ImplicitFTP_TLS(ftplib.FTP_TLS):
         return conn, size
 
     def retrbinary(self, cmd, callback, blocksize=8192, rest=None):
-        # Same close_notify-skip pattern as storbinary below — without
-        # this the FTPS download hangs at end-of-transfer waiting for
-        # a TLS shutdown that Bambu never sends.
+        # Same best-effort close_notify pattern as storbinary below.
         self.voidcmd('TYPE I')
         with self.transfercmd(cmd, rest) as conn:
             while 1:
@@ -241,19 +269,17 @@ class _ImplicitFTP_TLS(ftplib.FTP_TLS):
                 if not data:
                     break
                 callback(data)
+            _send_close_notify_best_effort(conn)
         return self.voidresp()
 
     def storbinary(self, cmd, fp, blocksize=8192, callback=None, rest=None):
-        # Verbatim copy of stdlib FTP_TLS.storbinary minus the trailing
-        # `conn.unwrap()` call. Bambu's FTPS server (P1S firmware in
-        # particular) sends `226 Transfer complete` on the control
-        # channel as soon as it sees the data socket close, but never
-        # sends a TLS close_notify on the data channel. Python's
-        # default unwrap() blocks waiting for that close_notify until
-        # the socket timeout fires — the upload appears to "hang" even
-        # though every byte was already received. Letting the socket
-        # close on context-manager exit (no unwrap) is what every
-        # working community Bambu FTPS client does.
+        # Verbatim stdlib FTP_TLS.storbinary except for the unwrap()
+        # call at the tail — we use a best-effort variant that sends
+        # the client's TLS close_notify alert (X1C vsftpd needs it; on
+        # current firmware the upload returns "426 Failure reading
+        # network stream" without it) but doesn't wait for the
+        # server's close_notify response (P1S firmware never sends
+        # one, so a blocking unwrap stalls until the socket timeout).
         self.voidcmd('TYPE I')
         with self.transfercmd(cmd, rest) as conn:
             while 1:
@@ -263,6 +289,7 @@ class _ImplicitFTP_TLS(ftplib.FTP_TLS):
                 conn.sendall(buf)
                 if callback is not None:
                     callback(buf)
+            _send_close_notify_best_effort(conn)
         return self.voidresp()
 
 
