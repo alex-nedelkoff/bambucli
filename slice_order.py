@@ -1631,18 +1631,23 @@ def _send_to_tm_t88v(
     except ImportError:
         fail("python-escpos not installed. Run: pip install python-escpos pyusb")
 
-    # Epson vendor ID; TM-T88V default USB product ID. If a future Epson model
-    # is used, check with `system_profiler SPUSBDataType` on macOS, or Device
-    # Manager / `Get-PnpDevice -Class USB` on Windows, for its IDs.
-    EPSON_VID = 0x04B8
-    TM_T88V_PID = 0x0202
+    # Generic 80mm ESC/POS thermal (enumerates as "USB 80Series2" on Windows).
+    # Same ESC/POS command set as the prior TM-T88V; only the USB IDs and
+    # python-escpos profile change. If a replacement printer is swapped in,
+    # check IDs with `system_profiler SPUSBDataType` on macOS, or Device
+    # Manager / `Get-PnpDevice -Class USB` on Windows.
+    PRINTER_VID = 0x0FE6
+    PRINTER_PID = 0x811E
     try:
-        usb_args = {"idVendor": EPSON_VID, "idProduct": TM_T88V_PID}
+        usb_args = {"idVendor": PRINTER_VID, "idProduct": PRINTER_PID}
         if _pyusb_backend is not None:
             usb_args["backend"] = _pyusb_backend
-        p = Usb(usb_args=usb_args, timeout=0, profile="TM-T88V")
+        # No vendor-specific profile — the "default" profile in python-escpos
+        # is the safe baseline for generic ESC/POS clones (48 cpl Font A on
+        # 80mm). RECEIPT_WIDTH=28 fits comfortably either way.
+        p = Usb(usb_args=usb_args, timeout=0, profile="default")
     except Exception as e:
-        fail(f"could not open USB printer (VID=0x{EPSON_VID:04X} PID=0x{TM_T88V_PID:04X}): {e}")
+        fail(f"could not open USB printer (VID=0x{PRINTER_VID:04X} PID=0x{PRINTER_PID:04X}): {e}")
 
     # Use Font B (9x17) for body text — ~64 cpl on 80mm paper and a less
     # 1:2-stretched aspect than Font A (12x24). set() is incremental in
