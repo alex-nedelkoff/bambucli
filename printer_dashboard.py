@@ -20,6 +20,7 @@ import json
 import re
 import socket
 import ssl
+import struct
 import subprocess
 import threading
 import time as _time_mod
@@ -99,6 +100,83 @@ def _grab_snapshot(ip: str, access_code: str, timeout: float = 12.0) -> bytes:
     if proc.stdout[:3] != b"\xff\xd8\xff":
         raise IOError("ffmpeg returned non-JPEG output")
     return proc.stdout
+
+
+# P1S doesn't expose RTSPS on port 322 — that's an X1-family path. Under
+# LAN-Only Mode the P1S instead exposes Bambu's legacy custom camera
+# protocol on TCP 6000: TLS-wrapped, 80-byte auth packet up front, then
+# a continuous stream of {16-byte header, JPEG payload} pairs. Protocol
+# verified against Doridian/OpenBambuAPI video.md, synman/bambu-go2rtc
+# camera-stream.py, and mattcar15/bambu-connect CameraClient.py — all
+# three agree byte-for-byte.
+_P1_CAM_PORT = 6000
+# 16-byte header: u32 LE payload-size, then `00 30 00 00`, then two zero
+# u32s. Username field is 32 bytes NUL-padded; access code is the same
+# 32-byte NUL-padded layout. Total 80 bytes, sent in a single write.
+_P1_CAM_AUTH_PREAMBLE = struct.pack("<IIII", 0x40, 0x3000, 0, 0)
+# Max plausible JPEG size from the camera (it's a 1280x720 MJPEG-ish
+# stream; frames are typically 60-120 KB). Anything beyond 4 MB is
+# almost certainly a desync — bail rather than blocking on recv.
+_P1_CAM_MAX_FRAME = 4 * 1024 * 1024
+
+
+def _recv_exact(sock: ssl.SSLSocket, n: int) -> bytes:
+    """Read exactly n bytes off a TLS socket. recv() can return short
+    even on blocking sockets, so loop until we have the full ask or the
+    peer closes (0-byte read → IOError)."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise IOError(f"peer closed after {len(buf)}/{n} bytes")
+        buf += chunk
+    return bytes(buf)
+
+
+def _grab_snapshot_p1(ip: str, access_code: str, timeout: float = 12.0) -> bytes:
+    """Pull a single JPEG frame from a P1-family printer over the LAN-Only
+    Mode custom camera protocol (TCP 6000).
+
+    Requires LAN-Only Mode enabled on the printer. Connection lifetime is
+    a single frame — we connect, auth, read one header + one payload,
+    close. The server would happily keep streaming, but a snapshot loop
+    that opens and closes per tick is cleaner than maintaining a
+    persistent connection that has to be torn down and rebuilt on
+    printer reboots / network blips.
+    """
+    auth = _P1_CAM_AUTH_PREAMBLE + b"bblp".ljust(32, b"\x00") \
+        + access_code.encode("ascii").ljust(32, b"\x00")
+    assert len(auth) == 80
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    raw = socket.create_connection((ip, _P1_CAM_PORT), timeout=timeout)
+    try:
+        # SNI is still set even with verify disabled — some embedded TLS
+        # stacks (mbedTLS in particular) refuse the handshake otherwise.
+        tls = ctx.wrap_socket(raw, server_hostname=ip)
+        try:
+            tls.settimeout(timeout)
+            tls.sendall(auth)
+            header = _recv_exact(tls, 16)
+            payload_size, _itrack, _flags, _resv = struct.unpack("<IIII", header)
+            if payload_size == 0 or payload_size > _P1_CAM_MAX_FRAME:
+                raise IOError(f"implausible frame size {payload_size}")
+            jpeg = _recv_exact(tls, payload_size)
+        finally:
+            try:
+                tls.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            tls.close()
+    finally:
+        try:
+            raw.close()
+        except OSError:
+            pass
+    if jpeg[:3] != b"\xff\xd8\xff":
+        raise IOError(f"non-JPEG payload (magic={jpeg[:4].hex()})")
+    return jpeg
 
 
 class _ImplicitFTP_TLS(ftplib.FTP_TLS):
@@ -431,10 +509,12 @@ class PrinterClient:
         SNAPSHOT_DIR.mkdir(exist_ok=True)
         out_path = SNAPSHOT_DIR / f"{self.id}.jpg"
         tmp_path = out_path.with_suffix(".jpg.tmp")
+        is_p1 = str(self.cfg.get("model", "")).upper().startswith("P1")
+        grabber = _grab_snapshot_p1 if is_p1 else _grab_snapshot
         while True:
             try:
                 jpg = await asyncio.to_thread(
-                    _grab_snapshot, self.cfg["ip"], self.cfg["access_code"],
+                    grabber, self.cfg["ip"], self.cfg["access_code"],
                 )
                 tmp_path.write_bytes(jpg)
                 tmp_path.replace(out_path)
