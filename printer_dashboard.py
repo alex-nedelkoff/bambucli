@@ -585,50 +585,13 @@ class PrinterClient:
         self.state["last_error"] = msg
         self.hub.notify(self.id)
 
-    def claim_external_spool(
-        self,
-        *,
-        tray_type: str = "PLA",
-        tray_color: str = "FFFFFFFFFF"[:8],
-        tray_info_idx: str = "GFL99",
-        nozzle_temp_min: int = 190,
-        nozzle_temp_max: int = 240,
-    ) -> None:
-        """Tell the printer "the external spool is loaded with X" via MQTT.
-
-        Needed for the P1S without AMS: its vt_tray reports
-        tray_color='00000000' (unidentified) when the user just spooled
-        plain filament on the back, and the firmware then refuses every
-        project_file with HMS 0500-0500-0001-0007 ("filament type
-        mismatch"). This command is what Bambu Studio's "Print without
-        AMS" path sends internally — ams_id=255 + tray_id=254 addresses
-        the external spool, tray_info_idx="GFL99" is the generic PLA
-        profile so the firmware doesn't require a brand-specific match.
-        """
-        payload = {
-            "print": {
-                "sequence_id": str(int(_time_mod.time())),
-                "command": "ams_filament_setting",
-                "ams_id": 255,
-                "tray_id": 254,
-                "tray_info_idx": tray_info_idx,
-                "tray_color": tray_color,
-                "tray_type": tray_type,
-                "nozzle_temp_min": nozzle_temp_min,
-                "nozzle_temp_max": nozzle_temp_max,
-                "setting_id": "0",
-            }
-        }
-        if self._client is None:
-            return
-        self._client.publish(self.request_topic, json.dumps(payload), qos=0)
-
     def publish_project_file(
         self,
         remote_filename: str,
         *,
         use_ams: bool = False,
         ams_mapping: list[int] | None = None,
+        md5_hex: str = "",
     ) -> None:
         """Tell the printer to start printing a file already uploaded to its
         FTP root. Reuses the dashboard's persistent MQTT client to avoid
@@ -650,39 +613,91 @@ class PrinterClient:
         """
         if self._client is None or not self.state.get("online"):
             raise RuntimeError(f"printer '{self.id}' is offline")
-        # ams_mapping is sent as a JSON-string-encoded array, not a real
-        # JSON array — Bambu's parser is picky about this.
-        mapping_str = json.dumps(ams_mapping) if ams_mapping else ""
-        # `file:///mnt/sdcard/<name>` is the URL form Bambu Studio itself
-        # publishes for LAN-mode "Send to Printer". The FTP root we
-        # uploaded to maps to /mnt/sdcard/ on both X1C and P1S firmware.
-        # The `ftp:///<name>` form is also documented in the wild but
-        # P1S firmware silently ignores it — the printer latches the
-        # subtask_name but the print never starts (gcode_state stays
-        # FINISH, gcode_file stays empty).
-        payload = {
-            "print": {
-                "sequence_id": str(int(_time_mod.time())),
-                "command": "project_file",
-                "param": "Metadata/plate_1.gcode",
-                "subtask_name": remote_filename.rsplit(".3mf", 1)[0],
-                "url": f"file:///mnt/sdcard/{remote_filename}",
-                "md5": "",
-                "bed_type": "auto",
-                "bed_levelling": True,
-                "flow_cali": False,
-                "vibration_cali": True,
-                "layer_inspect": False,
-                "use_ams": bool(use_ams),
-                "timelapse": False,
-                "ams_mapping": mapping_str,
-                "profile_id": "0",
-                "project_id": "0",
-                "subtask_id": "0",
-                "task_id": "0",
-            },
-            "user_id": "1",
-        }
+        is_p1 = str(self.cfg.get("model", "")).upper().startswith("P1")
+        # X1C historically accepted ams_mapping as a JSON-string-encoded
+        # array (`"[0,1]"`), but the pybambu reference template and current
+        # BambuStudio wire format send a real JSON array (`[0,1]`). P1S
+        # firmware ≥ 01.08.03 rejects the string form with print_error
+        # 0x0500C010; X1C is more forgiving. For P1S we emit the array,
+        # for X1C we keep the string form that's been in production.
+        # The 0/-1/255 sentinels: 0 = first AMS slot, -1 = "no mapping"
+        # (pybambu's external-spool fallback), 255 = vt_tray. P1S without
+        # AMS wants -1 here (matches pybambu's PRINT_PROJECT_FILE_TEMPLATE
+        # default for the same scenario).
+        if ams_mapping is None:
+            mapping_value: list[int] = [-1] if (is_p1 and not use_ams) else []
+        else:
+            mapping_value = ams_mapping
+        if is_p1:
+            ams_mapping_payload: list[int] | str = mapping_value
+        else:
+            ams_mapping_payload = json.dumps(mapping_value) if mapping_value else ""
+        subtask = remote_filename.rsplit(".3mf", 1)[0]
+        if is_p1:
+            # P1S firmware ≥ 01.08.03 shape-validates the project_file
+            # payload strictly. Match the pybambu reference template
+            # (PRINT_PROJECT_FILE_TEMPLATE in pybambu/commands.py) which
+            # is the smallest payload confirmed working on current P1S
+            # firmware: integer sequence_id, `ftp://<basename>` url with
+            # no `file://` or `/mnt/sdcard/` prefix, no `file`/`md5`
+            # fields at all, no printer/nozzle profile keys. The earlier
+            # X1C-style payload kept failing here with 0x0500C010 — the
+            # firmware's catch-all "couldn't start the job" error, not
+            # an actual SD read fault.
+            payload = {
+                "print": {
+                    "sequence_id": 0,
+                    "command": "project_file",
+                    "param": "Metadata/plate_1.gcode",
+                    "url": f"ftp://{remote_filename}",
+                    "bed_type": "auto",
+                    "timelapse": False,
+                    "bed_leveling": True,
+                    "flow_cali": True,
+                    "vibration_cali": True,
+                    "layer_inspect": True,
+                    "use_ams": bool(use_ams),
+                    "ams_mapping": (
+                        ams_mapping_payload
+                        if isinstance(ams_mapping_payload, list)
+                        else [-1]
+                    ),
+                    "subtask_name": subtask,
+                    "profile_id": "0",
+                    "project_id": "0",
+                    "subtask_id": "0",
+                    "task_id": "0",
+                },
+            }
+        else:
+            # X1C payload — unchanged from what's been in production. The
+            # extra `file`/`md5`/`url`-with-`file://`-prefix fields are
+            # what BambuStudio's own Send-to-Printer publishes and what
+            # X1C firmware expects.
+            payload = {
+                "print": {
+                    "sequence_id": str(int(_time_mod.time())),
+                    "command": "project_file",
+                    "param": "Metadata/plate_1.gcode",
+                    "subtask_name": subtask,
+                    "file": remote_filename,
+                    "url": f"file:///mnt/sdcard/{remote_filename}",
+                    "md5": md5_hex,
+                    "bed_type": "auto",
+                    "bed_leveling": True,
+                    "flow_cali": False,
+                    "vibration_cali": True,
+                    "layer_inspect": False,
+                    "use_ams": bool(use_ams),
+                    "timelapse": False,
+                    "ams_mapping": ams_mapping_payload,
+                    "profile_id": "0",
+                    "project_id": "0",
+                    "subtask_id": "0",
+                    "task_id": "0",
+                },
+                "user_id": "1",
+            }
         # QoS 0 to match the rest of the dashboard's traffic. Bambu's broker
         # doesn't reliably PUBACK at QoS 1 — the dashboard's pushall on
         # connect already uses qos=0 for the same reason. paho's
@@ -951,29 +966,22 @@ class DashboardHub:
             raise HTTPException(404, f"file not found: {local_path.name}")
         remote = remote_name or local_path.name
 
-        # Decide whether to pre-claim the external spool. P1S without
-        # AMS shows up here as ams_units=[] AND vt_tray.tray_color='00000000'
-        # when filament has been spooled on the back without telling
-        # the printer what it is. In that state every project_file
-        # gets rejected with HMS 0500-0500-0001-0007 — the only
-        # workaround is to MQTT-publish ams_filament_setting first so
-        # the firmware has *something* to compare against. We only do
-        # it for use_ams=False (external-spool prints) and only when
-        # the spool currently reports "unidentified", to avoid
-        # clobbering a setting the user actually configured.
-        report = (client.state.get("report") or {}).get("print") or {}
-        vt = report.get("vt_tray") or {}
-        spool_unidentified = (vt.get("tray_color") or "").strip("0") == ""
-        will_claim_spool = (not use_ams) and spool_unidentified
-
+        # On P1S firmware ≥ 01.08.03 the project_file MQTT command is
+        # rejected with HMS 0500-0500-0001-0007 ("MQTT Command verification
+        # failed") unless the printer has Developer Mode enabled — the
+        # firmware now requires a cloud-signed command token that we don't
+        # have. The FTPS upload below still succeeds (file lands on the SD
+        # card and is selectable from the touchscreen), so the send isn't
+        # totally wasted, but the auto-launch leg only works on X1C (no
+        # such gate) and on P1S with Developer Mode on. There used to be a
+        # `claim_external_spool` workaround here that pre-published an
+        # ams_filament_setting in the belief that 0500-0500-0001-0007 was
+        # a filament-id mismatch; the official Bambu wiki confirms it's
+        # actually the auth gate, so the workaround was a no-op and has
+        # been removed.
         def _work() -> None:
             _ftps_upload(client.cfg["ip"], client.cfg["access_code"],
                          local_path, remote)
-            if will_claim_spool:
-                client.claim_external_spool()
-                # Give the firmware a moment to ingest the new tray
-                # info before the project_file pre-print check fires.
-                _time_mod.sleep(0.5)
             client.publish_project_file(
                 remote, use_ams=use_ams, ams_mapping=ams_mapping,
             )
