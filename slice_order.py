@@ -225,17 +225,35 @@ def _hex_to_name(hex_str: str) -> str:
 
 
 def _load_font(size: int):
+    # Probe a few well-known TTF paths across platforms. Without one of
+    # these, PIL's load_default() returns a bitmap font that ignores the
+    # `size` argument entirely — every thumbnail comes out with 10px
+    # text regardless of how big we ask. The PIL 10+ load_default()
+    # accepts a size kwarg as a last-ditch fallback; older PIL doesn't,
+    # hence the try/except.
     from PIL import ImageFont
-    for path in (
+    candidates = (
+        # Windows
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\calibri.ttf",
+        # macOS
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/HelveticaNeue.ttc",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ):
+        # Linux (Debian/Ubuntu DejaVu, near-universal)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    )
+    for path in candidates:
         try:
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def _render_label_png(
