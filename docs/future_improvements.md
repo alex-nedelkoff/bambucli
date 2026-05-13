@@ -222,37 +222,6 @@ specific item as paid work) lives in the gitignored sibling docs, not here.
 
 ---
 
-### Identify which physical SD card is in each printer (idea)
-
-- **Status:** idea
-- **Why:** Now that "save to SD" is the primary path, staff swap SD cards
-  between printers when reorganizing the bay. There's no way today to
-  tell which physical card is currently in which printer — and the host
-  has no way to know which card the file is being uploaded to (just
-  which printer). A friendly name per card ("X1C-A's queue card",
-  "Floater #2") that follows the card across printers makes the
-  cardboard-and-Sharpie current workflow obsolete.
-- **What we already know after probing:**
-  - Bambu MQTT state reports `sdcard: true/false` and nothing else
-    storage-related. No volume label, no serial, no hash.
-  - FTPS doesn't expose volume labels either (high-level protocol).
-- **Proposed approach:** Marker-file bootstrap.
-  1. On first FTPS connect to a printer, check root for
-     `.bambucli_sd_id.txt`. If missing, write one with a UUID + the
-     printer it was first seen in.
-  2. On subsequent connects, read the marker to identify the physical
-     card. UUID travels with the card across printers.
-  3. Store `uuid -> friendly_name` in `sd_cards.json` (gitignored), with
-     a small admin endpoint for renaming.
-  4. Show the friendly name + last-seen-printer in the Save modal so
-     staff knows which queue they're adding to.
-- **Scope:** ~50 LOC + a small JSON store + UI tweak in the Save modal.
-  Maybe ~3 hrs end-to-end.
-- **Risks:** None really. Marker file is a single 64-byte hidden text
-  file at SD root. Worst case it gets deleted; we just regenerate.
-
----
-
 ### Other ideas (backlog, not scoped)
 
 These are minor or distant. Each gets a one-liner; expand into a real entry
@@ -290,6 +259,12 @@ when they become active.
 Move entries here when they land in `architecture.md`. Keep one-liners with
 the commit hash so it's easy to grep history.
 
+- `9fa20c4` — Pivot "Send to printer" → "Save to printer SD" (auto-launch
+  deferred; see Auto-send entry above). Identify physical SD cards via
+  hidden `.bambucli_sd_id.txt` marker file + sd_cards.json name store +
+  /sd-cards admin page. Auto-fill the receipt's SD-card field from the
+  resolved card name. Bump RECEIPT_WIDTH 28→32 for the generic 80mm
+  ESC/POS clone (TM-T88V swap left receipts ~10% under-sized).
 - `9aa832f` — P1S `project_file` minimal pybambu payload shape (fixes
   print_error 0x0500C010 on P1S firmware ≥ 01.08.03).
 - `86eb2fb` — P1S webcam preview via legacy port-6000 custom protocol
