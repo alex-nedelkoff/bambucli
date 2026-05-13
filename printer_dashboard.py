@@ -45,6 +45,11 @@ BASE_DIR = Path(__file__).resolve().parent
 PRINTERS_JSON = BASE_DIR / "printers.json"
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 SNAPSHOT_INTERVAL_SEC = 60
+# How often the FTPS-based SD-card marker probe refreshes. Cards only
+# change when a human swaps one between printers, which is rare — 5 min
+# is plenty fast for the receipt auto-fill to be right, and we also
+# trigger an immediate re-probe after every save-to-SD as a side-effect.
+SD_CARD_PROBE_INTERVAL_SEC = 300
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 router = APIRouter()
@@ -394,6 +399,104 @@ def _ftps_download(ip: str, access_code: str, remote_name: str, local_path: Path
                 pass
 
 
+# Tiny marker file we write to the printer's FTP root to identify the
+# physical SD card. Bambu firmware doesn't expose any card-side serial,
+# label, or fingerprint over MQTT or FTPS — this marker is the only way
+# to tell *which* card is in *which* printer (and to follow a card when
+# staff swap them between printers). Hidden via leading dot so it
+# doesn't clutter the touchscreen's file list.
+_SD_MARKER_NAME = ".bambucli_sd_id.txt"
+SD_CARDS_JSON = BASE_DIR / "sd_cards.json"
+
+
+def _ftps_get_sd_marker(ip: str, access_code: str,
+                        timeout: float = 30.0) -> str:
+    """Read the SD-card marker UUID from a printer's FTP root, writing a
+    fresh one if the marker doesn't exist yet. Same FTPS workarounds as
+    _ftps_upload (SECLEVEL=0 + TLS 1.2 + session-reuse + close_notify-
+    best-effort). Single connection per call.
+
+    Returns a UUID4 hex string identifying the physical SD card that's
+    currently in this printer. The UUID travels with the card across
+    printers — that's the whole point.
+    """
+    import io
+    import uuid as _uuid
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers("ALL")
+    try:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    except (AttributeError, ValueError):
+        pass
+
+    ftps = _ImplicitFTP_TLS(timeout=timeout)
+    ftps.context = ctx
+    try:
+        ftps.connect(ip, 990)
+        ftps.login("bblp", access_code)
+        ftps.prot_p()
+        ftps.set_pasv(True)
+        # Try to read an existing marker first.
+        buf = io.BytesIO()
+        try:
+            ftps.retrbinary(f"RETR {_SD_MARKER_NAME}", buf.write)
+            existing = buf.getvalue().decode("ascii", errors="ignore").strip()
+            # 32-char hex check — guard against a corrupted / hand-edited
+            # marker by rewriting if the content doesn't look like a uuid.
+            int(existing, 16)
+            if len(existing) == 32:
+                return existing
+        except (ftplib.error_perm, ValueError):
+            pass
+        # No marker (or unreadable): generate a fresh one and write it.
+        new_id = _uuid.uuid4().hex
+        ftps.storbinary(f"STOR {_SD_MARKER_NAME}",
+                        io.BytesIO(new_id.encode("ascii")))
+        return new_id
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            try:
+                ftps.close()
+            except Exception:
+                pass
+
+
+def _load_sd_card_names() -> dict[str, str]:
+    """Friendly names for SD card UUIDs, loaded from sd_cards.json. Missing
+    file / parse error returns an empty dict — caller falls back to a
+    short-prefix default like "Card a1b2c3d4"."""
+    if not SD_CARDS_JSON.exists():
+        return {}
+    try:
+        data = json.loads(SD_CARDS_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+
+
+def _save_sd_card_names(names: dict[str, str]) -> None:
+    """Atomic write: serialize to a temp sibling and rename, so a partial
+    write never leaves a corrupt sd_cards.json behind."""
+    tmp = SD_CARDS_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(names, indent=2, sort_keys=True),
+                   encoding="utf-8")
+    tmp.replace(SD_CARDS_JSON)
+
+
+def _default_sd_card_name(uuid_hex: str) -> str:
+    return f"Card {uuid_hex[:8]}"
+
+
 def _deep_merge(dst: dict, src: dict) -> None:
     """In-place recursive merge — Bambu sends partial reports, we keep the
     cumulative picture. Lists overwrite (AMS tray arrays are sent whole when
@@ -457,11 +560,24 @@ class PrinterClient:
             # the printer's task_id so a new print clears the old name.
             "captured_filename": None,
             "captured_task_id": None,
+            # Identifies the physical SD card currently in this printer.
+            # uuid is None until the FTPS marker probe has run at least
+            # once; refreshed on a background loop + after every save-to-SD
+            # so a card swap is picked up within ~5min worst-case.
+            "sd_card_uuid": None,
+            "sd_card_probed_at": None,
             "report": {},
         }
         self._client: mqtt.Client | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
+        self._sd_card_task: asyncio.Task | None = None
+        # Synchronisation guard: _ftps_get_sd_marker opens a real FTPS
+        # connection. Skip any probe attempt that overlaps with a
+        # save-to-SD upload to the same printer — Bambu's FTPS server
+        # is single-connection per credentials and a second login while
+        # the first is mid-STOR sometimes 426s the upload.
+        self._sd_card_lock = threading.Lock()
 
     def start(self) -> None:
         c = mqtt.Client(
@@ -485,7 +601,7 @@ class PrinterClient:
             self._set_error(f"connect failed: {e}")
 
     def stop(self) -> None:
-        for task_attr in ("_snapshot_task", "_reconnect_task"):
+        for task_attr in ("_snapshot_task", "_reconnect_task", "_sd_card_task"):
             t = getattr(self, task_attr)
             if t is not None:
                 t.cancel()
@@ -560,6 +676,57 @@ class PrinterClient:
             self.hub.notify(self.id)
             try:
                 await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                raise
+
+    def _probe_sd_card_sync(self) -> str | None:
+        """Run the FTPS marker probe on the calling thread. Updates the
+        cached uuid + timestamp; returns the uuid or None on failure.
+        Serialized by self._sd_card_lock so it doesn't race a concurrent
+        save-to-SD upload (Bambu's FTPS is single-connection per creds)."""
+        if not self._sd_card_lock.acquire(blocking=False):
+            return self.state.get("sd_card_uuid")
+        try:
+            uuid_hex = _ftps_get_sd_marker(
+                self.cfg["ip"], self.cfg["access_code"], timeout=30.0,
+            )
+        except Exception as e:
+            # Probe failures are non-fatal — the next periodic tick will
+            # try again. Surface as snapshot_error-style soft state.
+            self.state["sd_card_error"] = str(e)[:200]
+            return None
+        finally:
+            self._sd_card_lock.release()
+        self.state["sd_card_uuid"] = uuid_hex
+        self.state["sd_card_probed_at"] = _time_mod.time()
+        self.state["sd_card_error"] = None
+        return uuid_hex
+
+    async def _sd_card_loop(self) -> None:
+        """Refresh the SD-card marker every SD_CARD_PROBE_INTERVAL_SEC so a
+        card swap is picked up without a dashboard restart. First probe
+        runs immediately after MQTT connect (which triggers from the
+        watcher in _on_connect) — this loop is the catch-up for
+        long-running sessions."""
+        # First tick: short delay so we don't pile onto the initial MQTT
+        # connect storm.
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            raise
+        while True:
+            try:
+                await asyncio.to_thread(self._probe_sd_card_sync)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Belt-and-braces — _probe_sd_card_sync already swallows
+                # FTPS errors, but if anything else explodes we don't
+                # want to take down the dashboard's event loop.
+                pass
+            self.hub.notify(self.id)
+            try:
+                await asyncio.sleep(SD_CARD_PROBE_INTERVAL_SEC)
             except asyncio.CancelledError:
                 raise
 
@@ -692,136 +859,6 @@ class PrinterClient:
         self.state["last_error"] = msg
         self.hub.notify(self.id)
 
-    def publish_project_file(
-        self,
-        remote_filename: str,
-        *,
-        use_ams: bool = False,
-        ams_mapping: list[int] | None = None,
-        md5_hex: str = "",
-    ) -> None:
-        """Tell the printer to start printing a file already uploaded to its
-        FTP root. Reuses the dashboard's persistent MQTT client to avoid
-        Bambu's single-client-per-credentials kick — a one-shot publish
-        with the same credentials would knock the dashboard offline.
-
-        `ams_mapping` positions follow the file's filament index (0-based)
-        and the values are AMS slot indices (0-3 for the first AMS unit,
-        4-7 for the second, etc.). The sentinel value 255 (0xff) means
-        "external spool" (the back tray, vt_tray) — that's the firmware's
-        own magic number, not ours. When `use_ams=False` and the mapping
-        is omitted, the printer falls back to whatever filament is loaded
-        on the external spool.
-
-        The payload is the project_file command shape that Bambu Studio /
-        Handy send when invoking Send-to-Printer; the field set is the
-        cross-printer subset confirmed working on X1C and P1S in the
-        OpenBambuAPI / pybambu community ports.
-        """
-        if self._client is None or not self.state.get("online"):
-            raise RuntimeError(f"printer '{self.id}' is offline")
-        is_p1 = str(self.cfg.get("model", "")).upper().startswith("P1")
-        # X1C historically accepted ams_mapping as a JSON-string-encoded
-        # array (`"[0,1]"`), but the pybambu reference template and current
-        # BambuStudio wire format send a real JSON array (`[0,1]`). P1S
-        # firmware ≥ 01.08.03 rejects the string form with print_error
-        # 0x0500C010; X1C is more forgiving. For P1S we emit the array,
-        # for X1C we keep the string form that's been in production.
-        # The 0/-1/255 sentinels: 0 = first AMS slot, -1 = "no mapping"
-        # (pybambu's external-spool fallback), 255 = vt_tray. P1S without
-        # AMS wants -1 here (matches pybambu's PRINT_PROJECT_FILE_TEMPLATE
-        # default for the same scenario).
-        if ams_mapping is None:
-            mapping_value: list[int] = [-1] if (is_p1 and not use_ams) else []
-        else:
-            mapping_value = ams_mapping
-        if is_p1:
-            ams_mapping_payload: list[int] | str = mapping_value
-        else:
-            ams_mapping_payload = json.dumps(mapping_value) if mapping_value else ""
-        subtask = remote_filename.rsplit(".3mf", 1)[0]
-        if is_p1:
-            # P1S firmware ≥ 01.08.03 shape-validates the project_file
-            # payload strictly. Match the pybambu reference template
-            # (PRINT_PROJECT_FILE_TEMPLATE in pybambu/commands.py) which
-            # is the smallest payload confirmed working on current P1S
-            # firmware: integer sequence_id, `ftp://<basename>` url with
-            # no `file://` or `/mnt/sdcard/` prefix, no `file`/`md5`
-            # fields at all, no printer/nozzle profile keys. The earlier
-            # X1C-style payload kept failing here with 0x0500C010 — the
-            # firmware's catch-all "couldn't start the job" error, not
-            # an actual SD read fault.
-            payload = {
-                "print": {
-                    "sequence_id": 0,
-                    "command": "project_file",
-                    "param": "Metadata/plate_1.gcode",
-                    "url": f"ftp://{remote_filename}",
-                    "bed_type": "auto",
-                    "timelapse": False,
-                    "bed_leveling": True,
-                    "flow_cali": True,
-                    "vibration_cali": True,
-                    "layer_inspect": True,
-                    "use_ams": bool(use_ams),
-                    "ams_mapping": (
-                        ams_mapping_payload
-                        if isinstance(ams_mapping_payload, list)
-                        else [-1]
-                    ),
-                    "subtask_name": subtask,
-                    "profile_id": "0",
-                    "project_id": "0",
-                    "subtask_id": "0",
-                    "task_id": "0",
-                },
-            }
-        else:
-            # X1C payload — unchanged from what's been in production. The
-            # extra `file`/`md5`/`url`-with-`file://`-prefix fields are
-            # what BambuStudio's own Send-to-Printer publishes and what
-            # X1C firmware expects.
-            payload = {
-                "print": {
-                    "sequence_id": str(int(_time_mod.time())),
-                    "command": "project_file",
-                    "param": "Metadata/plate_1.gcode",
-                    "subtask_name": subtask,
-                    "file": remote_filename,
-                    "url": f"file:///mnt/sdcard/{remote_filename}",
-                    "md5": md5_hex,
-                    "bed_type": "auto",
-                    "bed_leveling": True,
-                    "flow_cali": False,
-                    "vibration_cali": True,
-                    "layer_inspect": False,
-                    "use_ams": bool(use_ams),
-                    "timelapse": False,
-                    "ams_mapping": ams_mapping_payload,
-                    "profile_id": "0",
-                    "project_id": "0",
-                    "subtask_id": "0",
-                    "task_id": "0",
-                },
-                "user_id": "1",
-            }
-        # QoS 0 to match the rest of the dashboard's traffic. Bambu's broker
-        # doesn't reliably PUBACK at QoS 1 — the dashboard's pushall on
-        # connect already uses qos=0 for the same reason. paho's
-        # is_published() returns True for QoS-0 as soon as the message is
-        # handed to the network loop, so the wait_for_publish guard below
-        # is a sanity check rather than a real ack.
-        info = self._client.publish(
-            self.request_topic, json.dumps(payload), qos=0,
-        )
-        try:
-            info.wait_for_publish(timeout=5.0)
-        except (ValueError, RuntimeError):
-            pass
-        if not info.is_published():
-            raise RuntimeError("MQTT publish did not complete within 5s")
-
-
 class DashboardHub:
     """Owns the printer clients + the set of subscribed WebSockets.
     Snapshot reads are guarded by a lock because MQTT callbacks mutate
@@ -844,6 +881,7 @@ class DashboardHub:
             if client.webcam_enabled:
                 client._snapshot_task = loop.create_task(client._snapshot_loop())
             client._reconnect_task = loop.create_task(client._reconnect_watchdog())
+            client._sd_card_task = loop.create_task(client._sd_card_loop())
         self._grams_fetch_task = loop.create_task(self._grams_fetch_loop())
 
     def stop(self) -> None:
@@ -1019,6 +1057,22 @@ class DashboardHub:
         controls. Returns id/label/model + online state + the printer's live
         AMS / external-spool palette so the UI can populate per-filament slot
         pickers without a follow-up query."""
+        # Lazy import: slice_order owns the palette + hex→name table. Doing
+        # the lookup here keeps the dashboard's snapshot endpoint as the
+        # single source of truth for "what colour is this slot loaded with"
+        # and saves the JS from carrying a duplicate table.
+        from slice_order import _hex_to_name as _bambu_hex_to_name
+        sd_names = _load_sd_card_names()
+
+        def _name_for(raw_hex: str) -> str:
+            # Bambu reports tray_color as RGBA (e.g. "FFFFFFFF") or empty.
+            # An unloaded slot reports "00000000" — distinct from real black.
+            # _hex_to_name wants "#RRGGBB", so strip alpha and prefix.
+            h = (raw_hex or "").strip()
+            if not h or set(h.upper()) <= {"0"}:
+                return ""
+            return _bambu_hex_to_name("#" + h[:6])
+
         with self._lock:
             out = []
             for c in self.clients.values():
@@ -1032,11 +1086,13 @@ class DashboardHub:
                     for tray in unit.get("tray") or []:
                         if not isinstance(tray, dict):
                             continue
+                        color_hex = (tray.get("tray_color") or "").strip()
                         slots.append({
                             "id": str(tray.get("id", "")),
                             # tray_color is RGBA hex (8 chars) when set; empty
                             # when the slot is unloaded.
-                            "color_hex": (tray.get("tray_color") or "").strip(),
+                            "color_hex": color_hex,
+                            "color_name": _name_for(color_hex),
                             "type": (tray.get("tray_type") or "").strip(),
                         })
                     ams_units.append({
@@ -1044,10 +1100,19 @@ class DashboardHub:
                         "slots": slots,
                     })
                 vt = p.get("vt_tray") or {}
+                vt_color = (vt.get("tray_color") or "").strip()
                 external_spool = {
-                    "color_hex": (vt.get("tray_color") or "").strip(),
+                    "color_hex": vt_color,
+                    "color_name": _name_for(vt_color),
                     "type": (vt.get("tray_type") or "").strip(),
                 }
+                sd_uuid = c.state.get("sd_card_uuid")
+                sd_card = None
+                if sd_uuid:
+                    sd_card = {
+                        "uuid": sd_uuid,
+                        "name": sd_names.get(sd_uuid) or _default_sd_card_name(sd_uuid),
+                    }
                 out.append({
                     "id": c.id,
                     "label": c.cfg.get("label", c.id),
@@ -1055,17 +1120,22 @@ class DashboardHub:
                     "online": bool(c.state.get("online")),
                     "ams_units": ams_units,
                     "external_spool": external_spool,
+                    "sd_card": sd_card,
                 })
             return out
 
-    async def send_to_printer(self, printer_id: str, local_path: Path,
-                              remote_name: str | None = None,
-                              *,
-                              use_ams: bool = False,
-                              ams_mapping: list[int] | None = None) -> dict:
-        """Upload a 3MF over FTPS and start the print via MQTT. Both legs run
-        on a worker thread; the FTP transfer dominates the wall time (a
-        ~30 MB 3MF takes ~3-5s over Wi-Fi)."""
+    async def save_to_printer_sd(self, printer_id: str, local_path: Path,
+                                 remote_name: str | None = None) -> dict:
+        """Upload a 3MF over FTPS so it lands on the printer's SD card and
+        shows up in the touchscreen's file list. No MQTT command is sent —
+        the print is started manually by staff from the touchscreen.
+
+        Auto-launch over MQTT was attempted earlier in development but
+        ran into the X1C "AMS Mapping Table" HMS that we couldn't clear
+        without cloud auth (see the bambu-ams-mapping-table memory).
+        Save-to-SD is the reliable LAN flow and is what the UI now uses
+        exclusively.
+        """
         client = self.clients.get(printer_id)
         if client is None:
             raise HTTPException(404, f"unknown printer '{printer_id}'")
@@ -1073,25 +1143,16 @@ class DashboardHub:
             raise HTTPException(404, f"file not found: {local_path.name}")
         remote = remote_name or local_path.name
 
-        # On P1S firmware ≥ 01.08.03 the project_file MQTT command is
-        # rejected with HMS 0500-0500-0001-0007 ("MQTT Command verification
-        # failed") unless the printer has Developer Mode enabled — the
-        # firmware now requires a cloud-signed command token that we don't
-        # have. The FTPS upload below still succeeds (file lands on the SD
-        # card and is selectable from the touchscreen), so the send isn't
-        # totally wasted, but the auto-launch leg only works on X1C (no
-        # such gate) and on P1S with Developer Mode on. There used to be a
-        # `claim_external_spool` workaround here that pre-published an
-        # ams_filament_setting in the belief that 0500-0500-0001-0007 was
-        # a filament-id mismatch; the official Bambu wiki confirms it's
-        # actually the auth gate, so the workaround was a no-op and has
-        # been removed.
         def _work() -> None:
             _ftps_upload(client.cfg["ip"], client.cfg["access_code"],
                          local_path, remote)
-            client.publish_project_file(
-                remote, use_ams=use_ams, ams_mapping=ams_mapping,
-            )
+            # Re-probe the SD-card marker right after upload: an associate
+            # who's hot-swapping cards usually saves the next file
+            # immediately after putting the new card in, so this catches
+            # the swap without waiting for the 5-min periodic refresh.
+            # The probe takes a separate FTPS connection but runs after
+            # the STOR completes, so it can't 426 the upload.
+            client._probe_sd_card_sync()
 
         try:
             await asyncio.to_thread(_work)
@@ -1102,11 +1163,18 @@ class DashboardHub:
         except RuntimeError as e:
             raise HTTPException(502, str(e))
 
+        sd_uuid = client.state.get("sd_card_uuid")
+        sd_names = _load_sd_card_names()
         return {
             "ok": True,
             "printer_id": printer_id,
             "label": client.cfg.get("label", printer_id),
             "filename": remote,
+            "sd_card": {
+                "uuid": sd_uuid,
+                "name": (sd_names.get(sd_uuid) or _default_sd_card_name(sd_uuid))
+                        if sd_uuid else None,
+            } if sd_uuid else None,
         }
 
 
@@ -1153,15 +1221,15 @@ async def api_printers_list() -> dict:
 async def api_printers_send(
     printer_id: str = Form(...),
     filename: str = Form(...),
-    use_ams: str = Form("false"),
-    # JSON-encoded array of slot indices, positionally matching the file's
-    # filaments (e.g. `[0,2]` = filament 1 → AMS slot 0, filament 2 → slot 2).
-    # The sentinel 255 means "external spool" (vt_tray).
-    ams_mapping: str = Form(""),
 ) -> dict:
-    """FTPS-upload the named 3MF (under printqueue/work) to the requested
-    printer and immediately publish a project_file MQTT command so the
-    print starts without staff touching the printer's screen."""
+    """FTPS-upload the named 3MF (under printqueue/work) to the chosen
+    printer's SD card. The file appears in the printer's on-screen file
+    list — staff start the print by tapping it on the touchscreen.
+
+    Endpoint name preserved (`/api/printers/send`) for URL stability;
+    the action is now save-to-SD only — see DashboardHub.save_to_printer_sd
+    for the rationale.
+    """
     if not _ID_RE.match(printer_id):
         raise HTTPException(400, "bad printer id")
     if "/" in filename or "\\" in filename or ".." in filename:
@@ -1173,21 +1241,72 @@ async def api_printers_send(
     if not str(local).startswith(str(work_dir.resolve())):
         raise HTTPException(400, "path escapes workdir")
 
-    mapping: list[int] | None = None
-    if ams_mapping.strip():
-        try:
-            parsed = json.loads(ams_mapping)
-        except json.JSONDecodeError:
-            raise HTTPException(400, "ams_mapping must be a JSON array")
-        if not isinstance(parsed, list) or not all(isinstance(x, int) for x in parsed):
-            raise HTTPException(400, "ams_mapping must be a JSON array of ints")
-        mapping = parsed
+    return await hub.save_to_printer_sd(printer_id, local)
 
-    return await hub.send_to_printer(
-        printer_id, local,
-        use_ams=str(use_ams).lower() in ("1", "true", "yes", "on"),
-        ams_mapping=mapping,
-    )
+
+@router.get("/sd-cards", response_class=HTMLResponse)
+async def page_sd_cards(request: Request) -> HTMLResponse:
+    """Tiny admin page: list every SD card UUID we've seen, let staff
+    rename them. Linked from the global nav so it lives at the same
+    level as /dashboard, /history, /jobs."""
+    cards = (await api_sd_cards())["cards"]
+    return templates.TemplateResponse(request, "sd_cards.html", {"cards": cards})
+
+
+@router.get("/api/sd-cards")
+async def api_sd_cards() -> dict:
+    """List every SD card UUID we've ever probed + its friendly name and
+    last-seen printer (if currently in one). Powers a small admin UI for
+    renaming cards to operational labels like R1/R2/B1."""
+    names = _load_sd_card_names()
+    snapshot = hub.list_printers()
+    by_uuid: dict[str, dict] = {}
+    for uuid_hex, name in names.items():
+        by_uuid[uuid_hex] = {
+            "uuid": uuid_hex,
+            "name": name,
+            "currently_in": None,
+        }
+    for p in snapshot:
+        sd = p.get("sd_card") or {}
+        u = sd.get("uuid")
+        if not u:
+            continue
+        if u not in by_uuid:
+            by_uuid[u] = {
+                "uuid": u,
+                "name": names.get(u) or _default_sd_card_name(u),
+                "currently_in": None,
+            }
+        by_uuid[u]["currently_in"] = {
+            "printer_id": p["id"], "printer_label": p["label"],
+        }
+    return {"cards": sorted(by_uuid.values(), key=lambda c: c["name"].lower())}
+
+
+@router.post("/api/sd-cards/{uuid_hex}/rename")
+async def api_sd_card_rename(
+    uuid_hex: str,
+    name: str = Form(...),
+) -> dict:
+    """Set the friendly name for an SD-card UUID. Empty / whitespace
+    names fall back to the default 'Card <prefix>'. Strict uuid format
+    check keeps the JSON store from accumulating junk keys if an
+    attacker hits this endpoint with bad inputs."""
+    if not re.match(r"^[0-9a-f]{32}$", uuid_hex):
+        raise HTTPException(400, "uuid must be 32 hex chars")
+    name = name.strip()[:80]
+    names = _load_sd_card_names()
+    if name:
+        names[uuid_hex] = name
+    else:
+        names.pop(uuid_hex, None)
+    _save_sd_card_names(names)
+    return {
+        "ok": True,
+        "uuid": uuid_hex,
+        "name": name or _default_sd_card_name(uuid_hex),
+    }
 
 
 @router.get("/api/jobs")

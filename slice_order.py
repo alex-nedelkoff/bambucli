@@ -1468,8 +1468,12 @@ def _split_plates(src: Path, out_dir: Path, base_name: str) -> list[Path]:
 
 # ---------- receipt ----------
 
-RECEIPT_WIDTH = 28  # Empirical printable width on this TM-T88V + paper combo:
-# 48 spilled by ~20, then 32 spilled by ~4. 28 fits.
+RECEIPT_WIDTH = 32  # Empirical printable width.
+# Pre-swap (TM-T88V): 48 spilled by ~20, 32 spilled by ~4, 28 fit.
+# Post-swap (generic 80mm ESC/POS clone, profile="default"): 28 left a
+# ~10% margin on both sides. The clone uses a slightly narrower char
+# pitch at Font B than the Epson did, so 32 fills the same physical
+# width that 28 did before. Bump again if a future printer differs.
 
 
 def _box_label(label: str, width: int = RECEIPT_WIDTH, indent: int = 2) -> str:
@@ -1535,6 +1539,7 @@ def _render_receipt_text(
     price: float,
     when: datetime,
     plates: list[dict],
+    sd_card: str = "",
 ) -> str:
     w = RECEIPT_WIDTH
     sep = "=" * w
@@ -1568,8 +1573,10 @@ def _render_receipt_text(
         lines.append("")
 
     # Plate table — same headers whether single- or multi-plate.
+    # Column widths sum to RECEIPT_WIDTH (currently 32):
+    #   #(1) + sp + Colour(10) + sp + Grams(5) + sp + Hr(2) + sp + Min(3) + sp×3 + Done(4)
     lines.append(
-        f"{'#':<1} {'Colour':<6} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}"
+        f"{'#':<1} {'Colour':<10} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}"
     )
     for i, p in enumerate(plates):
         pn = p.get("plate", i + 1)
@@ -1577,9 +1584,9 @@ def _render_receipt_text(
         h = secs // 3600
         mins = (secs % 3600) // 60
         grams = p.get("weight_grams", 0.0) or 0.0
-        pc = (plate_colors[i] or "")[:6]
+        pc = (plate_colors[i] or "")[:10]
         lines.append(
-            f"{pn:>1} {pc:<6} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}"
+            f"{pn:>1} {pc:<10} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}"
         )
         if len(plates) > 1:
             for fname, qty in _files_for_plate(p):
@@ -1600,7 +1607,13 @@ def _render_receipt_text(
     lines.append(_box_label("Charged in Koha"))
     lines.append(_signature_line())
     lines.append("")
-    lines.append(f"  SD card:  R1  R2  R3  B1")
+    if sd_card.strip():
+        # Dashboard knew which physical card the file was saved to — show
+        # it prominently instead of the manually-circled-after-the-fact
+        # R1/R2/R3/B1 row that used to live here.
+        lines.append(f"  SD card:  {sd_card.strip()}")
+    else:
+        lines.append(f"  SD card:  R1  R2  R3  B1")
     lines.append("")
     lines.append(f"  Printer:  1  2  3")
     lines.append("")
@@ -1615,6 +1628,7 @@ def _send_to_tm_t88v(
     total_time_s: int, total_mass_g: float, price: float,
     when: datetime,
     plates: list[dict],
+    sd_card: str = "",
 ) -> None:
     """Push the receipt to an Epson TM-T88V over USB. Uses python-escpos so
     the heavy formatting (bold/size/centre/cut) happens in hardware, which
@@ -1707,9 +1721,11 @@ def _send_to_tm_t88v(
         p.text("\n")
 
     p.set(font="b", bold=True)
-    # Tight 30-char table (single-space gaps) to fit in RECEIPT_WIDTH=32.
+    # Column widths sum to RECEIPT_WIDTH (32). See _render_receipt_text for
+    # the breakdown — both paths kept in sync so the staff-facing preview
+    # matches what actually prints.
     p.text(
-        f"{'#':<1} {'Colour':<6} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}\n"
+        f"{'#':<1} {'Colour':<10} {'Grams':>5} {'Hr':>2} {'Min':>3}   {'Done':<4}\n"
     )
     p.set(font="b", bold=False)
     for i, pl in enumerate(plates):
@@ -1718,9 +1734,9 @@ def _send_to_tm_t88v(
         h = secs // 3600
         mins = (secs % 3600) // 60
         grams = pl.get("weight_grams", 0.0) or 0.0
-        pc = (plate_colors[i] or "")[:7]
+        pc = (plate_colors[i] or "")[:10]
         p.text(
-            f"{pn:>1} {pc:<6} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}\n"
+            f"{pn:>1} {pc:<10} {grams:>5.1f} {h:>2} {mins:>3}   {'[ ]':>4}\n"
         )
         if len(plates) > 1:
             for fname, qty in _files_for_plate(pl):
@@ -1742,7 +1758,14 @@ def _send_to_tm_t88v(
     p.text(_box_label("Charged in Koha") + "\n")
     p.text(_signature_line() + "\n")
     p.text("\n")
-    p.text(f"  SD card:  R1  R2  R3  B1\n")
+    if sd_card.strip():
+        # Dashboard auto-fill: print the resolved card name bold so staff
+        # sees it at a glance instead of having to circle on a checklist.
+        p.set(font="b", bold=True)
+        p.text(f"  SD card:  {sd_card.strip()}\n")
+        p.set(font="b", bold=False)
+    else:
+        p.text(f"  SD card:  R1  R2  R3  B1\n")
     p.text("\n")
     p.text(f"  Printer:  1  2  3\n")
     p.text("\n")
@@ -1777,6 +1800,7 @@ def cmd_receipt(args) -> None:
         total_time_s=total_time_s, total_mass_g=total_mass_g,
         price=price, when=when,
         plates=plates,
+        sd_card=getattr(args, "sd_card", "") or "",
     )
 
     if args.send:
@@ -1819,6 +1843,9 @@ def main() -> None:
     rc.add_argument("--customer", required=True)
     rc.add_argument("--card", required=True, help="library card number (spaces allowed)")
     rc.add_argument("--color", required=True)
+    rc.add_argument("--sd-card", default="",
+                    help="resolved SD-card label from the dashboard (e.g. R1/R2/R3/B1). "
+                         "When set, prints prominently instead of the manual-circle row.")
     rc.add_argument("--send", action="store_true",
                     help="send to the USB TM-T88V instead of printing preview to stdout")
 

@@ -155,12 +155,16 @@ def _inspect(path: Path) -> dict:
     return _run([sys.executable, str(SLICE_ORDER), "inspect", str(path)])
 
 
-def _send_receipt(path: Path, customer: str, card: str, colors: str) -> dict:
-    return _run([
+def _send_receipt(path: Path, customer: str, card: str, colors: str,
+                  sd_card: str = "") -> dict:
+    cmd = [
         sys.executable, str(SLICE_ORDER), "receipt", str(path),
         "--customer", customer, "--card", card, "--color", colors,
         "--send",
-    ])
+    ]
+    if sd_card:
+        cmd += ["--sd-card", sd_card]
+    return _run(cmd)
 
 
 # ---------- routes ----------
@@ -735,11 +739,16 @@ async def print_receipt(
     customer: str = Form(...),
     card: str = Form(...),
     colors: str = Form(...),
+    # Optional: resolved SD-card label from the dashboard (e.g. "R2").
+    # When set, the receipt prints it prominently instead of the manual-
+    # circle R1/R2/R3/B1 row. `card` above is still the library card
+    # number — distinct field.
+    sd_card: str = Form(""),
 ) -> dict:
     path = Path(output_3mf)
     if not path.exists():
         raise HTTPException(404, f"3MF no longer exists: {output_3mf}")
-    result = _send_receipt(path, customer, card, colors)
+    result = _send_receipt(path, customer, card, colors, sd_card=sd_card)
     return {
         "sent": True,
         "filename": path.name,

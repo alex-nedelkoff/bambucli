@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}SD Cards · Makerspace Print Intake{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>SD Cards</h2>
+  <p class="hint">Every physical microSD card carries a hidden marker file
+    so the dashboard can identify which card is in which printer. Set a
+    friendly name (e.g. <code>R1</code>, <code>B1</code>) below — that
+    name auto-fills the &ldquo;card&rdquo; field on patron receipts when
+    you save a file to that printer.</p>
+
+  {% if not cards %}
+    <p class="hint"><em>No cards probed yet. Wait ~15 seconds after a
+      dashboard restart, or trigger a save-to-SD on any printer, then
+      refresh this page.</em></p>
+  {% else %}
+  <table class="plates">
+    <thead>
+      <tr>
+        <th>Card name</th>
+        <th>Currently in</th>
+        <th>UUID</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cards %}
+      <tr data-uuid="{{ c.uuid }}">
+        <td>
+          <input type="text" class="card-name-input" value="{{ c.name }}"
+                 maxlength="80" style="width: 12em;">
+        </td>
+        <td>
+          {% if c.currently_in %}
+            {{ c.currently_in.printer_label }}
+          {% else %}
+            <span class="muted">— not in any online printer</span>
+          {% endif %}
+        </td>
+        <td><code style="font-size: 11px; color: var(--muted);">{{ c.uuid[:12] }}…</code></td>
+        <td>
+          <button type="button" class="button-mini rename-btn">Save</button>
+          <span class="rename-status" style="margin-left: 8px; font-size: 12px;"></span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  document.querySelectorAll('.rename-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('tr');
+      const uuid = row.dataset.uuid;
+      const input = row.querySelector('.card-name-input');
+      const status = row.querySelector('.rename-status');
+      const name = input.value.trim();
+      btn.disabled = true;
+      status.textContent = '…';
+      status.className = 'rename-status';
+      const fd = new FormData();
+      fd.append('name', name);
+      try {
+        const res = await fetch(`/api/sd-cards/${uuid}/rename`, { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        const body = await res.json();
+        input.value = body.name;
+        status.textContent = '✓ saved';
+        status.className = 'rename-status success-msg';
+      } catch (e) {
+        status.textContent = 'failed: ' + e.message;
+        status.className = 'rename-status error-msg';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

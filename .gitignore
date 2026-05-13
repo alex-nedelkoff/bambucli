@@ -6,6 +6,11 @@ orders*.csv
 # Per-printer LAN access codes — printer-local secrets, don't commit.
 printers.json
 
+# Per-card friendly-name mapping (UUID → "R1"/"R2"/etc). Per-instance
+# config, not source. The UUIDs themselves live on the physical SD cards
+# in a hidden marker file; this just maps them to operational labels.
+sd_cards.json
+
 # Live camera snapshots (overwritten every minute by printer_dashboard).
 snapshots/
 

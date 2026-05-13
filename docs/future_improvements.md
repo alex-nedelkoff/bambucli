@@ -172,49 +172,84 @@ specific item as paid work) lives in the gitignored sibling docs, not here.
 
 ---
 
-### Auto-send print files to printer (idea)
+### Auto-send-and-start prints (blocked by firmware, deferred)
 
-- **Status:** idea, depends on monitoring being shipped first
-- **Why:** Currently staff copies the sliced 3MF onto a microSD card,
-  walks to the printer, inserts the card, navigates the SD browser, and
-  starts the print. Every step is error-prone (wrong file, wrong card,
-  wrong printer). Auto-send replaces the SD-card shuffle with a click on
-  the web UI: "Send to X1C #1". File lands on the printer, ready to start.
-- **What:** Add a "Send to printer" button on the order-result page and
-  history page. Backend uses FTP-over-TLS (port 990) to upload the 3MF to
-  the printer's `/sd/` directory, then optionally fires a print-start
-  command via MQTT.
-- **Variants:**
-  - **Conservative:** upload only, staff still presses Go on the touchscreen.
-    Eliminates the SD-card shuffle but keeps human-in-the-loop on the
-    actual print decision. **Recommended starting point.**
-  - **Aggressive:** upload + auto-start. Faster but no manual confirmation —
-    a wrong-printer selection wastes filament and time.
-- **Scope:**
-  - Builds on the printer config from monitoring (need IP + access code +
-    serial already).
-  - FTP-over-TLS upload helper: ~3 hrs.
-  - "Send to printer" button + per-printer router (which printer takes
-    which print): ~3 hrs.
-  - Result-page + history-page integration: ~2 hrs.
-  - Optional MQTT print-start command (if going the aggressive variant): ~2 hrs.
-  - Error handling (full SD card, network blip, printer busy): ~3 hrs.
-  - Testing: ~2 hrs.
-  - **Total: ~13 hrs conservative, ~15 hrs aggressive.**
-- **Dependencies / risks:**
-  - Hard-depends on monitoring being shipped first (need printer config
-    + connection plumbing).
-  - **Wrong-printer routing is the biggest risk.** Multi-printer makerspaces
-    need clear UX: "Send to X1C #1, currently idle" vs "Send to P1S, in
-    use until 4:23 PM." The history page would need to know which printer
-    a print was sent to so staff doesn't double-send.
-  - **SD card vs internal storage.** Bambu printers can store files on
-    the SD card (~32 GB) or internal flash (~smaller). Upload destination
-    matters — confirm before building.
-  - **MFIPPA again.** Patron filenames embed customer first name (per the
-    existing convention); these become visible on the printer's SD browser.
-    Already true today (staff puts the SD in), but worth flagging if the
-    auto-send variant changes who can see filenames remotely.
+- **Status:** blocked / deferred. Save-to-SD half is shipped (see "Done &
+  shipped"); auto-launch half is parked.
+- **Why parked:** The MQTT `project_file` command path is gated by two
+  firmware checks on current X1C/P1S firmware that we can't satisfy
+  LAN-only:
+  1. **MQTT command-auth gate (HMS 0500-0500-0001-0007).** Resolved by
+     enabling Developer Mode on the printer — operationally fine and
+     already done on all three printers. *Not* the blocker.
+  2. **AMS Mapping Table build (HMS 0700-2400-0002-0008, "Failed to get
+     AMS Mapping Table").** This is the blocker. Bambu Studio's slice
+     embeds a hashed filament_id (`P84c4869`) that lives in Bambu's cloud
+     profile DB. The X1C firmware needs the cloud to resolve hash → slot
+     `tray_info_idx` (e.g. `GFL99`). Without cloud auth the mapping table
+     build fails, the print starts heating, then pauses with the HMS.
+  - **Workarounds attempted, both insufficient:**
+    - Pre-publish `ams_filament_setting` to set the slot's `tray_info_idx`
+      to match the file's hash. Confirmed mechanically (slot tray_info_idx
+      did change), but HMS still fires — tray_info_idx-matching alone
+      doesn't satisfy the mapping table build.
+    - Rewrite the 3MF before upload so `filament_ids` becomes the firmware
+      short code (`GFL99` for PLA) across `project_settings.config`,
+      `slice_info.config`, and the gcode header. Verified the rewrite is
+      correct (no `P84c4869` left in the file), but HMS still fires. So
+      *something else* in the firmware's mapping-table validation
+      requires state we can't reach from MQTT — possibly a one-time
+      "user confirmed slot" flag set via touchscreen, possibly something
+      about RFID tray_uuid presence. Couldn't reproduce a working flow
+      without cloud auth.
+  - Worth retrying when one of these conditions changes:
+    - Bambu firmware update loosens / changes the mapping table check.
+    - We get a packet capture of BambuStudio's actual working LAN-mode
+      send-to-printer payload (different from what we expected; the
+      session attempted this but Studio's MQTT connection always kicks
+      our sniffer due to single-client-per-credentials).
+    - A community library (`bambulabs_api`, `pybambu`, `Bambu-Farm`,
+      OrcaSlicer's BambuTunnel) figures it out — periodically re-check
+      their `print_project_file` paths.
+  - `BambUI` (https://github.com/fidoriel/BambUI) was evaluated and
+    *doesn't* solve it — they sidestep entirely by hardcoding
+    `use_ams: false`. Don't waste time on it again.
+- **Smaller follow-ups worth doing without the auto-launch piece:**
+  - Persist `task_id` → eavesdropped filename binding to disk (so a
+    dashboard restart mid-print doesn't lose the name).
+  - SD-card identifier (see next entry) — would tell staff which physical
+    card holds which queue.
+
+---
+
+### Identify which physical SD card is in each printer (idea)
+
+- **Status:** idea
+- **Why:** Now that "save to SD" is the primary path, staff swap SD cards
+  between printers when reorganizing the bay. There's no way today to
+  tell which physical card is currently in which printer — and the host
+  has no way to know which card the file is being uploaded to (just
+  which printer). A friendly name per card ("X1C-A's queue card",
+  "Floater #2") that follows the card across printers makes the
+  cardboard-and-Sharpie current workflow obsolete.
+- **What we already know after probing:**
+  - Bambu MQTT state reports `sdcard: true/false` and nothing else
+    storage-related. No volume label, no serial, no hash.
+  - FTPS doesn't expose volume labels either (high-level protocol).
+- **Proposed approach:** Marker-file bootstrap.
+  1. On first FTPS connect to a printer, check root for
+     `.bambucli_sd_id.txt`. If missing, write one with a UUID + the
+     printer it was first seen in.
+  2. On subsequent connects, read the marker to identify the physical
+     card. UUID travels with the card across printers.
+  3. Store `uuid -> friendly_name` in `sd_cards.json` (gitignored), with
+     a small admin endpoint for renaming.
+  4. Show the friendly name + last-seen-printer in the Save modal so
+     staff knows which queue they're adding to.
+- **Scope:** ~50 LOC + a small JSON store + UI tweak in the Save modal.
+  Maybe ~3 hrs end-to-end.
+- **Risks:** None really. Marker file is a single 64-byte hidden text
+  file at SD root. Worst case it gets deleted; we just regenerate.
 
 ---
 
@@ -255,6 +290,15 @@ when they become active.
 Move entries here when they land in `architecture.md`. Keep one-liners with
 the commit hash so it's easy to grep history.
 
+- `9aa832f` — P1S `project_file` minimal pybambu payload shape (fixes
+  print_error 0x0500C010 on P1S firmware ≥ 01.08.03).
+- `86eb2fb` — P1S webcam preview via legacy port-6000 custom protocol
+  (X1C still uses RTSPS:322; P1S has no RTSPS exposed on LAN).
+- `21de1e1` — FTPS data-channel TLS `close_notify` best-effort
+  (fixes X1C `426 Failure reading network stream` on upload).
+- `03d706d` — Receipt printer swap to generic 80mm ESC/POS clone.
+- `5d83080` — Thumbnail font discovery on Windows/Linux (PIL
+  `load_default()` fallback no longer ignores `size`).
 - `25e5668` — Receipt: waiver checkbox + SD card option list (R1/R2/R3/B1).
 - `4a7ae2a` — Email intake — initial cut (regex + Ollama prefill, no
   confidence gate yet).

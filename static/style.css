@@ -535,6 +535,11 @@ table.uploads .inspecting-cell {
   margin-right: 4px;
 }
 .send-to-printer .send-btn { padding: 6px 12px; font-size: 13px; }
+.send-to-printer .send-btn .sd-tag {
+  opacity: 0.7;
+  font-size: 11px;
+  margin-left: 2px;
+}
 .send-to-printer .send-btn-warn {
   border-color: #c98a00;
   background: #fff7e0;
@@ -594,6 +599,13 @@ table.uploads .inspecting-cell {
   display: inline-block;
   width: 18px; height: 18px;
   border-radius: 3px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.swatch-md {
+  display: inline-block;
+  width: 28px; height: 28px;
+  border-radius: 4px;
   border: 1px solid var(--border);
   flex-shrink: 0;
 }
