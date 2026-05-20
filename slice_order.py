@@ -144,8 +144,11 @@ def cmd_extract(eml_path: str) -> None:
             (wd / safe).write_bytes(part.get_payload(decode=True) or b"")
             stls.append(safe)
 
-    (wd / "body.txt").write_text(body)
-    (wd / "source.txt").write_text(str(src))
+    # Explicit utf-8 — Path.write_text defaults to the OS locale, which
+    # on Windows is cp1252 and chokes on common Gmail-isms (narrow
+    # no-break spaces around times, em-dashes, emoji, non-Latin names).
+    (wd / "body.txt").write_text(body, encoding="utf-8")
+    (wd / "source.txt").write_text(str(src), encoding="utf-8")
 
     print(json.dumps({
         "workdir": str(wd),
