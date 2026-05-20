@@ -156,7 +156,7 @@ def _inspect(path: Path) -> dict:
 
 
 def _send_receipt(path: Path, customer: str, card: str, colors: str,
-                  sd_card: str = "") -> dict:
+                  sd_card: str = "", order_taken_by: str = "") -> dict:
     cmd = [
         sys.executable, str(SLICE_ORDER), "receipt", str(path),
         "--customer", customer, "--card", card, "--color", colors,
@@ -164,6 +164,8 @@ def _send_receipt(path: Path, customer: str, card: str, colors: str,
     ]
     if sd_card:
         cmd += ["--sd-card", sd_card]
+    if order_taken_by:
+        cmd += ["--order-taken-by", order_taken_by]
     return _run(cmd)
 
 
@@ -744,11 +746,16 @@ async def print_receipt(
     # circle R1/R2/R3/B1 row. `card` above is still the library card
     # number — distinct field.
     sd_card: str = Form(""),
+    # Selected staff name from the persistent header dropdown. Goes on
+    # the "Order taken by:" line at the bottom of the receipt. Empty
+    # falls back to slice_order.DEFAULT_ORDER_TAKEN_BY.
+    order_taken_by: str = Form(""),
 ) -> dict:
     path = Path(output_3mf)
     if not path.exists():
         raise HTTPException(404, f"3MF no longer exists: {output_3mf}")
-    result = _send_receipt(path, customer, card, colors, sd_card=sd_card)
+    result = _send_receipt(path, customer, card, colors,
+                           sd_card=sd_card, order_taken_by=order_taken_by)
     return {
         "sent": True,
         "filename": path.name,

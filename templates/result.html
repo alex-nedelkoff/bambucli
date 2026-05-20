@@ -151,6 +151,10 @@
       fd.append('card',       order.card);
       fd.append('colors',     (order.colors || []).join(','));
       if (order.sd_card) fd.append('sd_card', order.sd_card);
+      // Active staff from the persistent header dropdown. Empty when
+      // nothing's picked — slice_order falls back to its default.
+      const staff = (window.activeStaff && window.activeStaff()) || '';
+      if (staff) fd.append('order_taken_by', staff);
 
       try {
         const res = await fetch('/receipt', { method: 'POST', body: fd });

@@ -85,6 +85,13 @@ _MIGRATIONS: list[tuple[str, str]] = [
     # again until RETRY_DELAY_MINUTES has elapsed since the last try.
     ("grams_fetch_attempts",      "ALTER TABLE jobs ADD COLUMN grams_fetch_attempts INTEGER DEFAULT 0"),
     ("grams_fetch_last_attempt",  "ALTER TABLE jobs ADD COLUMN grams_fetch_last_attempt TEXT"),
+    # 32-char hex UUID of the physical SD card the print ran from.
+    # Latched at first observation; subsequent frames don't overwrite —
+    # the card a print *started* on is its authoritative card. NULL for
+    # rows from before this column existed (filled in by a one-shot
+    # backfill against the live FTPS listings; see
+    # printer_dashboard.api_backfill_sd_cards).
+    ("sd_card_uuid",              "ALTER TABLE jobs ADD COLUMN sd_card_uuid TEXT"),
 ]
 
 # Tunables for the FTP-fetch retry loop. 4 attempts × 30 min ≈ 2 hours
@@ -269,6 +276,7 @@ def record_observation(
     total_layers: int | None = None,
     captured_filename: str | None = None,
     mc_percent: int | None = None,
+    sd_card_uuid: str | None = None,
 ) -> bool:
     """Upsert a row for this (printer_id, task_id) observation.
 
@@ -408,14 +416,16 @@ def record_observation(
                 "outcome, print_error, started_at, finished_at, last_seen, "
                 "duration_seconds, prediction_seconds, total_layers, "
                 "capture_source, matched_order_filename, "
-                "predicted_grams, actual_grams, last_percent, grams_fetch_state"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "predicted_grams, actual_grams, last_percent, grams_fetch_state, "
+                "sd_card_uuid"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     printer_id, tid, name, filename, gcode_state,
                     outcome, int(print_error or 0), started_at, finished_at, now,
                     duration, prediction_seconds, total_layers,
                     source, matched,
                     predicted_grams, actual, pct, fetch_state,
+                    sd_card_uuid,
                 ),
             )
             c.commit()
@@ -454,6 +464,11 @@ def record_observation(
             if predicted_grams and not row["predicted_grams"]:
                 updates["predicted_grams"] = predicted_grams
                 updates["grams_fetch_state"] = "done"
+            # Backfill sd_card_uuid only when missing — never overwrite.
+            # The card a print *started* on is its authoritative card
+            # even if staff swap mid-print; the existing value sticks.
+            if sd_card_uuid and not row["sd_card_uuid"]:
+                updates["sd_card_uuid"] = sd_card_uuid
             # Promote a row from "no fetch needed yet" to "pending" once
             # we know the filename — gives the FTP fetch loop a target.
             if (not row["predicted_grams"] and not predicted_grams
@@ -656,6 +671,79 @@ def set_grams_fetch_state(job_id: int, state: str) -> None:
             (state, job_id),
         )
         c.commit()
+
+
+def backfill_sd_card_uuid(
+    filename_to_candidates: dict[str, list[tuple[str, str]]],
+) -> dict:
+    """One-shot fill of jobs.sd_card_uuid for rows that don't have one.
+
+    `filename_to_candidates` maps a filename to a list of
+    (sd_card_uuid, printer_id_currently_holding_card) pairs — built by
+    the caller from FTPS LISTs across every online printer.
+
+    Match rules (ordered):
+      1. The row's printer matches a card currently holding the file →
+         set sd_card_uuid to that card. Strongest signal: the file IS
+         on that printer's card right now, and the row says that
+         printer ran the file at last_seen.
+      2. Exactly one card across all printers holds the file → set to
+         that card. Same physical file, just moved to a different
+         printer since the print ran.
+      3. Multiple cards hold the file and none is on the printer that
+         ran the row → ambiguous, leave NULL. Don't guess.
+
+    Returns counts so the admin UI can report what changed."""
+    matched_printer = 0
+    matched_global = 0
+    ambiguous = 0
+    no_match = 0
+    with _lock:
+        c = _connect()
+        rows = c.execute(
+            "SELECT id, printer_id, filename FROM jobs "
+            "WHERE sd_card_uuid IS NULL AND filename IS NOT NULL"
+        ).fetchall()
+        for r in rows:
+            cands = filename_to_candidates.get(r["filename"]) or []
+            if not cands:
+                # Also try the .gcode.3mf / .3mf variants Bambu firmware
+                # writes — the DB may have one form, the SD card the
+                # other. See _fetch_grams_for for the same workaround.
+                fn = r["filename"]
+                base = fn
+                for suffix in (".gcode.3mf", ".3mf"):
+                    if base.endswith(suffix):
+                        base = base[: -len(suffix)]
+                        break
+                for variant in (f"{base}.gcode.3mf", f"{base}.3mf"):
+                    if variant == fn:
+                        continue
+                    cands = filename_to_candidates.get(variant) or []
+                    if cands:
+                        break
+            if not cands:
+                no_match += 1
+                continue
+            same_printer = [u for u, pid in cands if pid == r["printer_id"]]
+            if same_printer:
+                c.execute("UPDATE jobs SET sd_card_uuid = ? WHERE id = ?",
+                          (same_printer[0], r["id"]))
+                matched_printer += 1
+            elif len(cands) == 1:
+                c.execute("UPDATE jobs SET sd_card_uuid = ? WHERE id = ?",
+                          (cands[0][0], r["id"]))
+                matched_global += 1
+            else:
+                ambiguous += 1
+        c.commit()
+    return {
+        "matched_same_printer": matched_printer,
+        "matched_unique_global": matched_global,
+        "ambiguous_skipped": ambiguous,
+        "no_match": no_match,
+        "total_examined": len(rows),
+    }
 
 
 def delete_job(job_id: int) -> dict:

@@ -409,6 +409,70 @@ _SD_MARKER_NAME = ".bambucli_sd_id.txt"
 SD_CARDS_JSON = BASE_DIR / "sd_cards.json"
 
 
+def _ftps_list_sd_files(ip: str, access_code: str,
+                        timeout: float = 30.0) -> list[dict]:
+    """List .3mf files at the printer's FTP root with size + mtime.
+    Returns [{"name": str, "size": int|None, "mtime_epoch": float|None}]
+    sorted newest-first by mtime, oldest-with-no-mtime last. Same
+    SECLEVEL=0 + TLS 1.2 + implicit-FTPS workarounds as the other
+    helpers. Raises on connection failure so the caller can surface
+    the FTPS error in the API response."""
+    import datetime as _dt_mod
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+    except ssl.SSLError:
+        ctx.set_ciphers("ALL")
+    try:
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    except (AttributeError, ValueError):
+        pass
+
+    ftps = _ImplicitFTP_TLS(timeout=timeout)
+    ftps.context = ctx
+    try:
+        ftps.connect(ip, 990)
+        ftps.login("bblp", access_code)
+        ftps.prot_p()
+        ftps.set_pasv(True)
+        try:
+            names = ftps.nlst()
+        except ftplib.error_perm:
+            names = []
+        results: list[dict] = []
+        for n in names:
+            if not n.lower().endswith(".3mf"):
+                continue
+            size: int | None = None
+            try:
+                size = ftps.size(n)
+            except (ftplib.error_perm, ftplib.error_reply):
+                pass
+            mtime: float | None = None
+            try:
+                resp = ftps.voidcmd(f"MDTM {n}")
+                # MDTM response: "213 YYYYMMDDhhmmss"
+                tail = resp.split()[-1]
+                mtime = _dt_mod.datetime.strptime(tail, "%Y%m%d%H%M%S").timestamp()
+            except (ftplib.error_perm, ftplib.error_reply, ValueError, IndexError):
+                pass
+            results.append({"name": n, "size": size, "mtime_epoch": mtime})
+        # Newest mtime first; entries without an mtime sink to the end.
+        results.sort(key=lambda r: (r["mtime_epoch"] is None, -(r["mtime_epoch"] or 0)))
+        return results
+    finally:
+        try:
+            ftps.quit()
+        except Exception:
+            try:
+                ftps.close()
+            except Exception:
+                pass
+
+
 def _ftps_get_sd_marker(ip: str, access_code: str,
                         timeout: float = 30.0) -> str:
     """Read the SD-card marker UUID from a printer's FTP root, writing a
@@ -868,6 +932,7 @@ class PrinterClient:
                 total_layers=p.get("total_layer_num") or None,
                 captured_filename=self.state.get("captured_filename"),
                 mc_percent=p.get("mc_percent"),
+                sd_card_uuid=self.state.get("sd_card_uuid"),
             )
         except Exception:
             # Logging must not break the dashboard's MQTT loop. The
@@ -1134,12 +1199,35 @@ class DashboardHub:
 
     def snapshot_all(self) -> list[dict]:
         with self._lock:
-            return [deepcopy(c.state) for c in self.clients.values()]
+            states = [deepcopy(c.state) for c in self.clients.values()]
+        names = _load_sd_card_names()
+        return [self._enrich_snapshot(s, names) for s in states]
 
     def snapshot_one(self, printer_id: str) -> dict | None:
         with self._lock:
             c = self.clients.get(printer_id)
-            return deepcopy(c.state) if c else None
+            if c is None:
+                return None
+            state = deepcopy(c.state)
+        return self._enrich_snapshot(state)
+
+    @staticmethod
+    def _enrich_snapshot(state: dict, names: dict[str, str] | None = None) -> dict:
+        """Decorate a raw client-state dict with display-ready fields the
+        UI needs but that depend on out-of-band data (sd_cards.json).
+        Done at the snapshot boundary so the per-frame MQTT path doesn't
+        pay for the JSON lookup."""
+        uuid_hex = state.get("sd_card_uuid")
+        if uuid_hex:
+            if names is None:
+                names = _load_sd_card_names()
+            state["sd_card"] = {
+                "uuid": uuid_hex,
+                "name": names.get(uuid_hex) or _default_sd_card_name(uuid_hex),
+            }
+        else:
+            state["sd_card"] = None
+        return state
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=4)
@@ -1381,6 +1469,99 @@ async def api_sd_cards() -> dict:
     return {"cards": sorted(by_uuid.values(), key=lambda c: c["name"].lower())}
 
 
+@router.get("/api/printers/{printer_id}/sd-files")
+async def api_printer_sd_files(printer_id: str) -> dict:
+    """List the .3mf files on the SD card currently in `printer_id`.
+    Live FTPS LIST — slow (a few seconds) and gated by the printer's
+    _sd_card_lock so it doesn't race the marker probe or a save-to-SD
+    upload. Used by the /sd-cards admin page to show what's actually
+    on each card."""
+    if not _ID_RE.match(printer_id):
+        raise HTTPException(400, "bad printer id")
+    client = hub.clients.get(printer_id)
+    if client is None:
+        raise HTTPException(404, "printer not found")
+
+    def _list_under_lock() -> list[dict]:
+        # Block for up to 10s so a probe-in-progress doesn't 503 the
+        # request — staff explicitly clicked this; some wait is OK.
+        if not client._sd_card_lock.acquire(timeout=10.0):
+            raise RuntimeError("printer busy (FTPS in use by another task)")
+        try:
+            return _ftps_list_sd_files(
+                client.cfg["ip"], client.cfg["access_code"], timeout=30.0,
+            )
+        finally:
+            client._sd_card_lock.release()
+
+    try:
+        files = await asyncio.to_thread(_list_under_lock)
+    except Exception as e:
+        raise HTTPException(503, f"FTPS list failed: {e}")
+    return {
+        "printer_id": printer_id,
+        "printer_label": client.cfg.get("label", printer_id),
+        "sd_card_uuid": client.state.get("sd_card_uuid"),
+        "files": files,
+    }
+
+
+@router.post("/api/sd-cards/backfill-jobs")
+async def api_backfill_sd_cards() -> dict:
+    """One-shot: list every online printer's SD card, build a
+    filename → [(sd_card_uuid, printer_id)] map, and fill in
+    jobs.sd_card_uuid for rows that don't have one.
+
+    Match rules live in jobs_db.backfill_sd_card_uuid. The short
+    version: prefer the card currently in the printer that ran the
+    row; fall back to a globally-unique card holding the file;
+    otherwise leave the row alone rather than guess. See the
+    feedback-no-guessed-data memory."""
+    clients = list(hub.clients.values())
+
+    def _list_one(client: PrinterClient) -> tuple[str, str | None, list[str], str | None]:
+        """Returns (printer_id, sd_card_uuid, [filenames], error_or_None)."""
+        uuid_hex = client.state.get("sd_card_uuid")
+        if not uuid_hex:
+            return (client.id, None, [], "no SD card UUID — probe hasn't run yet")
+        if not client._sd_card_lock.acquire(timeout=15.0):
+            return (client.id, uuid_hex, [], "printer busy (FTPS in use)")
+        try:
+            files = _ftps_list_sd_files(
+                client.cfg["ip"], client.cfg["access_code"], timeout=30.0,
+            )
+        except Exception as e:
+            return (client.id, uuid_hex, [], f"FTPS list failed: {e}")
+        finally:
+            client._sd_card_lock.release()
+        return (client.id, uuid_hex, [f["name"] for f in files], None)
+
+    # Fan out across printers — each printer has its own FTPS lock, so
+    # the worker threads don't fight each other.
+    results = await asyncio.gather(*[
+        asyncio.to_thread(_list_one, c) for c in clients
+    ])
+
+    filename_to_candidates: dict[str, list[tuple[str, str]]] = {}
+    per_printer: list[dict] = []
+    for printer_id, sd_uuid, filenames, err in results:
+        per_printer.append({
+            "printer_id": printer_id,
+            "sd_card_uuid": sd_uuid,
+            "file_count": len(filenames),
+            "error": err,
+        })
+        if not sd_uuid or err:
+            continue
+        for fn in filenames:
+            filename_to_candidates.setdefault(fn, []).append((sd_uuid, printer_id))
+
+    counts = await asyncio.to_thread(
+        jobs_db.backfill_sd_card_uuid, filename_to_candidates,
+    )
+    return {"per_printer": per_printer, "counts": counts}
+
+
 @router.post("/api/sd-cards/{uuid_hex}/rename")
 async def api_sd_card_rename(
     uuid_hex: str,
@@ -1472,11 +1653,17 @@ async def jobs_page(request: Request) -> HTMLResponse:
         return f"{h}h{mins:02d}m" if h else f"{mins}m"
 
     jobs = jobs_db.list_jobs(limit=500)
+    sd_names = _load_sd_card_names()
     now = _dt.datetime.now()
     for j in jobs:
         for fld in ("started_at", "finished_at", "last_seen"):
             v = j.get(fld) or ""
             j[f"_{fld}_short"] = f"{v[5:10]} {v[11:16]}" if len(v) >= 16 else v
+
+        # Friendly SD card name (e.g. "R1"). Falls back to the
+        # default Card xxxxxxxx label if the staff hasn't named it.
+        u = j.get("sd_card_uuid")
+        j["_sd_card_name"] = (sd_names.get(u) or _default_sd_card_name(u)) if u else ""
 
         # Duration: completed jobs use the persisted total; in-flight
         # jobs use (now - started_at) so the column doesn't show blank

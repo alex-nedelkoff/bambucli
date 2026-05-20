@@ -33,6 +33,7 @@
       <tr>
         <th>Last seen</th>
         <th>Printer</th>
+        <th>Card</th>
         <th>File</th>
         <th>State</th>
         <th>Outcome</th>
@@ -52,6 +53,7 @@
           {% if j.is_manually_edited %}data-edited="1"{% endif %}>
         <td class="ts-cell">{{ j._last_seen_short }}{% if j.is_manually_edited %} <span title="Manually edited — observer won't overwrite" class="edited-mark">✎</span>{% endif %}</td>
         <td><span class="printer-badge printer-{{ j.printer_id }}">{{ j.printer_id | upper }}</span></td>
+        <td>{% if j._sd_card_name %}<span class="sd-card-tag" title="{{ j.sd_card_uuid }}">{{ j._sd_card_name }}</span>{% endif %}</td>
         <td>
           <span class="editable" data-field="subtask_name"
                 title="Click to edit filename">{{ j.subtask_name or '' }}</span>

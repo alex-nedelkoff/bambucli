@@ -1485,12 +1485,30 @@ def _box_label(label: str, width: int = RECEIPT_WIDTH, indent: int = 2) -> str:
 
 
 def _signature_line(label: str = "Completed by:", width: int = RECEIPT_WIDTH) -> str:
-    """Format '  Label ___________' padded to `width`."""
+    """Format '  Label ___________' padded to `width`. No longer used
+    for staff-handoff lines (those are circle-able initials now) — kept
+    available for any external callers."""
     prefix = f"  {label} "
     underscores = max(4, width - len(prefix))
     return f"{prefix}{'_' * underscores}"
+
+
+# Initials staff circle on the printed receipt at hand-off. Order
+# matches the web dropdown so a visual scan lines up across surfaces.
+# Mapping (kept in a comment because it's organizational, not code):
+#   AB = Aspen   AN = Alex   AP = Amanda   SA = Sheila   WA = Waren
+STAFF_INITIALS: list[str] = ["AB", "AN", "AP", "SA", "WA"]
+
+
+def _circle_initials_line(indent: int = 2) -> str:
+    """Render a row of staff initials with enough horizontal breathing
+    room for a pen to circle one. 4 spaces between initials keeps the
+    line under RECEIPT_WIDTH while staying clearly pen-circleable."""
+    return f"{' ' * indent}{'    '.join(STAFF_INITIALS)}"
+
+
 PRICE_PER_GRAM = 0.05  # CAD, library's current rate
-ORDER_TAKEN_BY = "Alex"
+DEFAULT_ORDER_TAKEN_BY = "Alex"  # CLI / API fallback when no staff is picked
 
 
 def _format_card(raw: str) -> str:
@@ -1540,6 +1558,8 @@ def _render_receipt_text(
     when: datetime,
     plates: list[dict],
     sd_card: str = "",
+    order_taken_by: str = "",
+    sliced_filename: str = "",
 ) -> str:
     w = RECEIPT_WIDTH
     sep = "=" * w
@@ -1555,6 +1575,14 @@ def _render_receipt_text(
     lines.append("")
     lines.append(f"Card: {_format_card(card)}")
     lines.append(f"Date: {_fmt_receipt_dt(when)}")
+    if sliced_filename:
+        # Truncate to fit width: "Source: " prefix (8) + filename. The
+        # 3MF name is what staff types into Koha to find the order later
+        # and what shows up on the printer's touchscreen, so worth
+        # surfacing prominently.
+        avail = w - len("Source: ")
+        sf = sliced_filename if len(sliced_filename) <= avail else sliced_filename[: avail - 1] + "…"
+        lines.append(f"Source: {sf}")
     lines.append(_box_label("Needs waiver signed", indent=0))
     lines.append(thin)
 
@@ -1603,9 +1631,13 @@ def _render_receipt_text(
     lines.append(f"  Total time: {_fmt_time(total_time_s)}")
     lines.append("")
     lines.append(sep)
-    lines.append(f"  Order taken by: {ORDER_TAKEN_BY}")
+    lines.append(f"  Order taken by: {order_taken_by or DEFAULT_ORDER_TAKEN_BY}")
     lines.append(_box_label("Charged in Koha"))
-    lines.append(_signature_line())
+    # "Completed by:" now uses circle-able initials instead of an
+    # underline so staff can sign off without a pen-on-the-line.
+    lines.append("  Completed by:")
+    lines.append("")
+    lines.append(_circle_initials_line())
     lines.append("")
     if sd_card.strip():
         # Dashboard knew which physical card the file was saved to — show
@@ -1619,6 +1651,11 @@ def _render_receipt_text(
     lines.append("")
     lines.append(_box_label("Notified for pickup"))
     lines.append(_box_label("Order picked up"))
+    # Authorising-staff initials for the hand-off itself. Blank lines
+    # bracket the row so the pen has clear vertical space to circle.
+    lines.append("")
+    lines.append(_circle_initials_line())
+    lines.append("")
     lines.append(sep)
     return "\n".join(lines) + "\n"
 
@@ -1629,6 +1666,8 @@ def _send_to_tm_t88v(
     when: datetime,
     plates: list[dict],
     sd_card: str = "",
+    order_taken_by: str = "",
+    sliced_filename: str = "",
 ) -> None:
     """Push the receipt to an Epson TM-T88V over USB. Uses python-escpos so
     the heavy formatting (bold/size/centre/cut) happens in hardware, which
@@ -1707,6 +1746,10 @@ def _send_to_tm_t88v(
 
     p.text(f"Card: {_format_card(card)}\n")
     p.text(f"Date: {_fmt_receipt_dt(when)}\n")
+    if sliced_filename:
+        avail = RECEIPT_WIDTH - len("Source: ")
+        sf = sliced_filename if len(sliced_filename) <= avail else sliced_filename[: avail - 1] + "…"
+        p.text(f"Source: {sf}\n")
     p.text(_box_label("Needs waiver signed", indent=0) + "\n")
     p.text(thin + "\n")
 
@@ -1754,9 +1797,14 @@ def _send_to_tm_t88v(
     p.text(f"  Total time: {_fmt_time(total_time_s)}\n")
     p.text("\n")
     p.text(sep + "\n")
-    p.text(f"  Order taken by: {ORDER_TAKEN_BY}\n")
+    p.text(f"  Order taken by: {order_taken_by or DEFAULT_ORDER_TAKEN_BY}\n")
     p.text(_box_label("Charged in Koha") + "\n")
-    p.text(_signature_line() + "\n")
+    # Circle-able initials replace the old "Completed by: ___________"
+    # signature line. Blank lines bracket the initials so the pen has
+    # vertical room to draw a clean circle.
+    p.text("  Completed by:\n")
+    p.text("\n")
+    p.text(_circle_initials_line() + "\n")
     p.text("\n")
     if sd_card.strip():
         # Dashboard auto-fill: print the resolved card name bold so staff
@@ -1771,6 +1819,11 @@ def _send_to_tm_t88v(
     p.text("\n")
     p.text(_box_label("Notified for pickup") + "\n")
     p.text(_box_label("Order picked up") + "\n")
+    # Hand-off authorisation initials. Blank lines mirror the "Completed
+    # by" block above for a consistent circle-able layout.
+    p.text("\n")
+    p.text(_circle_initials_line() + "\n")
+    p.text("\n")
     p.text(sep + "\n\n\n")
     p.cut()
 
@@ -1801,6 +1854,10 @@ def cmd_receipt(args) -> None:
         price=price, when=when,
         plates=plates,
         sd_card=getattr(args, "sd_card", "") or "",
+        order_taken_by=getattr(args, "order_taken_by", "") or "",
+        # The 3MF the receipt was rendered from — staff use this name
+        # to find the job in Koha / on the printer touchscreen.
+        sliced_filename=path.name,
     )
 
     if args.send:
@@ -1846,6 +1903,9 @@ def main() -> None:
     rc.add_argument("--sd-card", default="",
                     help="resolved SD-card label from the dashboard (e.g. R1/R2/R3/B1). "
                          "When set, prints prominently instead of the manual-circle row.")
+    rc.add_argument("--order-taken-by", default="",
+                    help="staff first name to print on the 'Order taken by:' line. "
+                         f"Defaults to '{DEFAULT_ORDER_TAKEN_BY}' when empty.")
     rc.add_argument("--send", action="store_true",
                     help="send to the USB TM-T88V instead of printing preview to stdout")
 

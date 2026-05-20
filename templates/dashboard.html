@@ -36,6 +36,14 @@
   }
   .pt-title { margin: 0; font-size: 18px; font-weight: 700; }
   .pt-model { color: var(--muted); font-size: 12px; margin-top: 1px; }
+  /* Small chip showing which physical SD card is currently in this
+     printer — driven by the FTPS marker probe. Click-through to the
+     admin page for renaming. UUID stays in title= as a fallback. */
+  .pt-sdcard { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pt-sdcard a { color: inherit; text-decoration: none;
+                 border-bottom: 1px dotted var(--muted); }
+  .pt-sdcard a:hover { color: var(--text); }
+  .pt-sdcard.empty { font-style: italic; opacity: 0.7; }
 
   .badge {
     padding: 3px 10px;
@@ -317,11 +325,26 @@
       ? (fileInfo.generic ? `<em>${fileInfo.label}</em>` : `<strong>${fileInfo.label}</strong>`)
       : '<em>no active job</em>';
 
+    const sd = snap.sd_card;
+    // Distinguish warm-up (probe hasn't run yet — common in the first
+    // ~30s after a dashboard restart) from a real miss. The probe sets
+    // sd_card_probed_at on success and sd_card_error on failure, so
+    // both being null means "still checking".
+    let sdHtml;
+    if (sd) {
+      sdHtml = `<div class="pt-sdcard">SD: <a href="/sd-cards" title="${sd.uuid}">${sd.name}</a></div>`;
+    } else if (!snap.sd_card_probed_at && !snap.sd_card_error) {
+      sdHtml = `<div class="pt-sdcard empty">SD: checking…</div>`;
+    } else {
+      sdHtml = `<div class="pt-sdcard empty">SD: not detected</div>`;
+    }
+
     tile.innerHTML = `
       <div class="pt-head">
         <div>
           <h2 class="pt-title">${snap.label || snap.id}</h2>
           <div class="pt-model">${snap.model || ''}</div>
+          ${sdHtml}
         </div>
         <span class="badge ${cls}">${snap.online ? stateRaw : 'OFFLINE'}</span>
       </div>
@@ -339,7 +362,9 @@
       <div class="stats">
         <div class="stat"><div class="lbl">Nozzle</div><div class="val">${fmtTemp(p.nozzle_temper)}</div><div class="sub">→ ${fmtTemp(p.nozzle_target_temper)}</div></div>
         <div class="stat"><div class="lbl">Bed</div><div class="val">${fmtTemp(p.bed_temper)}</div><div class="sub">→ ${fmtTemp(p.bed_target_temper)}</div></div>
-        <div class="stat"><div class="lbl">Chamber</div><div class="val">${fmtTemp(chamber)}</div><div class="sub">&nbsp;</div></div>
+        ${(snap.model || '').toUpperCase().startsWith('P1')
+          ? ''
+          : `<div class="stat"><div class="lbl">Chamber</div><div class="val">${fmtTemp(chamber)}</div><div class="sub">&nbsp;</div></div>`}
         <div class="stat"><div class="lbl">Layer</div><div class="val">${layer ?? '—'}${totalLayer ? ' / ' + totalLayer : ''}</div><div class="sub">&nbsp;</div></div>
       </div>
 
