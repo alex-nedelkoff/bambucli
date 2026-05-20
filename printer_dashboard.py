@@ -497,6 +497,44 @@ def _default_sd_card_name(uuid_hex: str) -> str:
     return f"Card {uuid_hex[:8]}"
 
 
+# Per-printer captured_filename + captured_task_id persisted to disk so a
+# dashboard restart mid-print doesn't lose the name we eavesdropped from
+# the original project_file command. The /report frames Bambu firmware
+# sends in steady state often omit subtask_name, so without this restart
+# = "Local print (no filename sent)" until the next print starts.
+CAPTURE_STATE_JSON = BASE_DIR / "printer_capture_state.json"
+_capture_state_lock = threading.Lock()
+
+
+def _load_capture_state() -> dict[str, dict]:
+    if not CAPTURE_STATE_JSON.exists():
+        return {}
+    try:
+        data = json.loads(CAPTURE_STATE_JSON.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _save_capture_state_entry(printer_id: str, filename: str | None,
+                              task_id: str | None) -> None:
+    """Atomic read-modify-write for one printer's slot. Tiny file; we
+    rewrite the whole thing each call so concurrent printers can't
+    clobber each other's entries."""
+    with _capture_state_lock:
+        data = _load_capture_state()
+        if filename is None and task_id is None:
+            data.pop(printer_id, None)
+        else:
+            data[printer_id] = {"filename": filename, "task_id": task_id}
+        tmp = CAPTURE_STATE_JSON.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
+                       encoding="utf-8")
+        tmp.replace(CAPTURE_STATE_JSON)
+
+
 def _deep_merge(dst: dict, src: dict) -> None:
     """In-place recursive merge — Bambu sends partial reports, we keep the
     cumulative picture. Lists overwrite (AMS tray arrays are sent whole when
@@ -578,6 +616,16 @@ class PrinterClient:
         # is single-connection per credentials and a second login while
         # the first is mid-STOR sometimes 426s the upload.
         self._sd_card_lock = threading.Lock()
+
+        # Restore the captured filename across dashboard restarts so an
+        # in-flight print doesn't fall back to "Local print (no
+        # filename sent)" until it ends. See _persist_capture.
+        _saved = _load_capture_state().get(self.id) or {}
+        _sn = _saved.get("filename")
+        if isinstance(_sn, str) and _sn:
+            self.state["captured_filename"] = _sn
+            _stid = _saved.get("task_id")
+            self.state["captured_task_id"] = _stid if isinstance(_stid, str) else None
 
     def start(self) -> None:
         c = mqtt.Client(
@@ -787,6 +835,7 @@ class PrinterClient:
                     # we'll bind to whatever task_id appears in the next
                     # report (None is the "unbound" sentinel).
                     self.state["captured_task_id"] = None
+                    self._persist_capture()
                     self.hub.notify(self.id)
             return
 
@@ -809,7 +858,7 @@ class PrinterClient:
         firmwares that drop subtask_name from steady-state reports."""
         p = (self.state.get("report") or {}).get("print") or {}
         try:
-            jobs_db.record_observation(
+            wake_fetch = jobs_db.record_observation(
                 self.id,
                 task_id=p.get("task_id"),
                 subtask_name=(p.get("subtask_name") or "").strip() or None,
@@ -823,7 +872,9 @@ class PrinterClient:
         except Exception:
             # Logging must not break the dashboard's MQTT loop. The
             # row simply won't exist; the next report will retry.
-            pass
+            wake_fetch = False
+        if wake_fetch:
+            self.hub.signal_grams_fetch_now()
 
     def _update_filename_capture(self) -> None:
         """Reconcile captured_filename against the latest report.
@@ -833,7 +884,11 @@ class PrinterClient:
           - Capture is unbound (just received a project_file command): bind to
             whatever task_id the printer is now reporting.
           - Task_id changed and we never got a fresh name for it: drop the
-            stale capture so we don't mislabel the new print."""
+            stale capture so we don't mislabel the new print.
+        Persists to disk whenever captured_filename / captured_task_id
+        actually change, so a dashboard restart keeps the name."""
+        before = (self.state.get("captured_filename"),
+                  self.state.get("captured_task_id"))
         p = (self.state["report"].get("print") or {})
         current_tid = p.get("task_id")
         sn = (p.get("subtask_name") or "").strip()
@@ -841,18 +896,34 @@ class PrinterClient:
         if sn:
             self.state["captured_filename"] = sn
             self.state["captured_task_id"] = current_tid
-            return
-
-        if (self.state.get("captured_filename")
+        elif (self.state.get("captured_filename")
                 and self.state.get("captured_task_id") is None
                 and current_tid):
             self.state["captured_task_id"] = current_tid
-            return
-
-        if (current_tid
+        elif (current_tid
                 and self.state.get("captured_task_id") not in (None, current_tid)):
             self.state["captured_filename"] = None
             self.state["captured_task_id"] = None
+
+        after = (self.state.get("captured_filename"),
+                 self.state.get("captured_task_id"))
+        if after != before:
+            self._persist_capture()
+
+    def _persist_capture(self) -> None:
+        """Best-effort write of (captured_filename, captured_task_id) to
+        the on-disk JSON. Called only when the values actually change,
+        so we're not hitting the disk on every report frame."""
+        try:
+            _save_capture_state_entry(
+                self.id,
+                self.state.get("captured_filename"),
+                self.state.get("captured_task_id"),
+            )
+        except Exception:
+            # Persistence is best-effort. A failed write doesn't
+            # corrupt in-memory state, and the next change retries.
+            pass
 
     def _set_error(self, msg: str) -> None:
         self.state["online"] = False
@@ -871,9 +942,23 @@ class DashboardHub:
         self.loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
         self._grams_fetch_task: asyncio.Task | None = None
+        # Signalled from the MQTT callback thread when a row transitions
+        # to terminal with pending grams. The fetch loop waits on this
+        # event instead of sleeping a flat 60s, so the FTPS fetch lands
+        # while the file is still on the SD card.
+        self._grams_fetch_event: asyncio.Event | None = None
+
+    def signal_grams_fetch_now(self) -> None:
+        """Thread-safe wakeup for the grams-fetch loop. Called from the
+        paho MQTT callback thread; the actual Event.set runs back on the
+        asyncio loop via call_soon_threadsafe."""
+        ev = self._grams_fetch_event
+        if ev is not None and self.loop is not None:
+            self.loop.call_soon_threadsafe(ev.set)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+        self._grams_fetch_event = asyncio.Event()
         for cfg in _load_printers():
             client = PrinterClient(cfg, self)
             self.clients[client.id] = client
@@ -916,8 +1001,20 @@ class DashboardHub:
                 # Never let a single tick kill the loop; bad rows are
                 # individually marked "failed" inside the tick.
                 pass
+            # Wait on the wake event with a 60s ceiling. Terminal
+            # transitions (a print finishing/failing/cancelling) set the
+            # event so the fetch runs within ms instead of up to a
+            # minute later — see DashboardHub.signal_grams_fetch_now.
+            ev = self._grams_fetch_event
             try:
-                await asyncio.sleep(60)
+                if ev is not None:
+                    try:
+                        await asyncio.wait_for(ev.wait(), timeout=60)
+                    except asyncio.TimeoutError:
+                        pass
+                    ev.clear()
+                else:
+                    await asyncio.sleep(60)
             except asyncio.CancelledError:
                 raise
 

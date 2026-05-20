@@ -269,7 +269,7 @@ def record_observation(
     total_layers: int | None = None,
     captured_filename: str | None = None,
     mc_percent: int | None = None,
-) -> None:
+) -> bool:
     """Upsert a row for this (printer_id, task_id) observation.
 
     Idempotent under repeated MQTT frames — the dashboard fires this on
@@ -285,6 +285,13 @@ def record_observation(
     common case on X1C: the firmware drops subtask_name from steady-
     state reports, but the dashboard's /request eavesdrop already
     captured the name from the original project_file command.
+
+    Returns True iff this observation just moved a row into a terminal
+    state AND that row still needs a grams fetch (grams_fetch_state
+    'pending', filename known). Callers use this to wake the FTP-fetch
+    loop immediately — Bambu rotates SD-card storage, so the moment of
+    the terminal transition is the highest-probability window for the
+    file to still be on the printer.
     """
     raw_tid = "" if task_id is None else str(task_id).strip()
     name = (subtask_name or "").strip() or (captured_filename or "").strip() or None
@@ -296,7 +303,7 @@ def record_observation(
     # we drop the frame.
     synthesized = not raw_tid or raw_tid == "0"
     if synthesized and not name:
-        return
+        return False
 
     filename = f"{name}.3mf" if name and not name.endswith(".3mf") else name
     source, matched = _derive_source_and_match(filename)
@@ -313,7 +320,16 @@ def record_observation(
         except (TypeError, ValueError):
             pass
     now = _now_iso()
-    is_running_state = (gcode_state or "").upper() in ("RUNNING", "PREPARE", "PAUSE", "PAUSED")
+    # P1S firmware keeps emitting gcode_state="RUNNING" with a non-zero
+    # print_error after a print fails, until staff clear the job at the
+    # touchscreen. Treat those frames as not-running so the synthesized-
+    # task_id reuse logic below doesn't mistake them for a fresh re-print
+    # and mint a new phantom row every couple of seconds.
+    has_print_error = int(print_error or 0) != 0
+    is_running_state = (
+        (gcode_state or "").upper() in ("RUNNING", "PREPARE", "PAUSE", "PAUSED")
+        and not has_print_error
+    )
 
     with _lock:
         c = _connect()
@@ -403,7 +419,7 @@ def record_observation(
                 ),
             )
             c.commit()
-            return
+            return bool(finished_at and fetch_state == "pending")
 
         # Existing row: patch the fields that legitimately change.
         # Once a human has touched this row through the /api/jobs/<id>
@@ -450,10 +466,12 @@ def record_observation(
         # — it's a liveness signal, not user-correctable.
         if pct is not None and (row["last_percent"] is None or pct > row["last_percent"]):
             updates["last_percent"] = pct
+        just_finished = False
         if not manually_edited:
             if is_running and not row["started_at"]:
                 updates["started_at"] = now
             if is_terminal and not row["finished_at"]:
+                just_finished = True
                 updates["finished_at"] = now
                 # Compute wall-clock duration when both ends are now known.
                 start_iso = updates.get("started_at") or row["started_at"]
@@ -479,6 +497,8 @@ def record_observation(
         values = list(updates.values()) + [row["id"]]
         c.execute(f"UPDATE jobs SET {sets} WHERE id = ?", values)
         c.commit()
+        final_fetch_state = updates.get("grams_fetch_state", row["grams_fetch_state"])
+        return bool(just_finished and final_fetch_state == "pending")
 
 
 # Whitelist of columns the staff-facing UI is allowed to overwrite.
