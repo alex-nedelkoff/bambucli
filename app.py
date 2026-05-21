@@ -775,6 +775,55 @@ async def download(name: str) -> FileResponse:
     )
 
 
+@app.get("/feedback", response_class=HTMLResponse)
+async def feedback_page(request: Request) -> HTMLResponse:
+    """Pilot-phase suggestions / bug-report log. Anyone with a browser
+    on the LAN can post and resolve entries; no auth (the staff picker
+    name attribution is honour-system)."""
+    import feedback_db
+    entries = feedback_db.list_entries()
+    return templates.TemplateResponse(
+        request, "feedback.html", {"entries": entries},
+    )
+
+
+@app.post("/feedback")
+async def feedback_create(
+    body: str = Form(...),
+    author: str = Form(""),
+) -> dict:
+    import feedback_db
+    try:
+        entry = feedback_db.add_entry(author=author, body=body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "entry": entry}
+
+
+@app.post("/feedback/{entry_id}/resolve")
+async def feedback_resolve(
+    entry_id: int,
+    resolved: str = Form("1"),
+    resolved_by: str = Form(""),
+) -> dict:
+    import feedback_db
+    new_state = resolved == "1"
+    entry = feedback_db.set_resolved(
+        entry_id, resolved=new_state, resolved_by=resolved_by,
+    )
+    if entry is None:
+        raise HTTPException(404, f"feedback #{entry_id} not found")
+    return {"ok": True, "entry": entry}
+
+
+@app.post("/feedback/{entry_id}/delete")
+async def feedback_delete(entry_id: int) -> dict:
+    import feedback_db
+    if not feedback_db.delete_entry(entry_id):
+        raise HTTPException(404, f"feedback #{entry_id} not found")
+    return {"ok": True, "deleted": entry_id}
+
+
 @app.get("/ledger.csv")
 async def ledger_csv() -> Response:
     records = _read_ledger()

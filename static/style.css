@@ -720,3 +720,98 @@ table.uploads .inspecting-cell {
 .edit-saved { background: #d6f5d6 !important; transition: background 0.6s ease-out; }
 .edit-failed { background: #fbcaca !important; }
 .edited-mark { color: var(--muted); font-size: 11px; margin-left: 4px; }
+
+/* ---------- Feedback tab ---------- */
+.feedback-form {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin: 14px 0 22px;
+}
+.feedback-form textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 80px;
+}
+.feedback-form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.feedback-author-label { color: var(--text); }
+.feedback-author-label.feedback-author-empty {
+  color: var(--orange-dark);
+  font-weight: 500;
+}
+.feedback-section-header {
+  margin: 18px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.feedback-section-header .dim { font-weight: 400; }
+.feedback-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.feedback-entry {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--navy);
+  border-radius: 5px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+}
+.feedback-entry.resolved {
+  border-left-color: var(--border);
+  opacity: 0.7;
+  background: var(--bg);
+}
+.feedback-entry-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.feedback-entry-author {
+  font-weight: 600;
+  color: var(--text);
+}
+.feedback-entry-time { font-size: 12px; }
+.feedback-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--orange-light);
+  color: var(--orange-dark);
+}
+.feedback-badge-resolved {
+  background: #e6f4ea;
+  color: #1e7a3a;
+}
+.feedback-entry-body {
+  white-space: pre-wrap;
+  color: var(--text);
+  margin: 4px 0 8px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.feedback-entry-actions {
+  display: flex;
+  gap: 8px;
+}
+.feedback-empty {
+  margin: 6px 0 0;
+  font-style: italic;
+  font-size: 13px;
+}
