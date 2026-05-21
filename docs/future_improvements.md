@@ -222,6 +222,84 @@ specific item as paid work) lives in the gitignored sibling docs, not here.
 
 ---
 
+### Filament-grams coverage gap on touchscreen prints (idea)
+
+- **Status:** idea, structural limit; ~half of historical rows blank
+- **Why:** Patron billing keys off `actual_grams`. The web-intake path
+  fills this in 100% of the time (slicer prediction is in `orders.json`
+  at submit). Touchscreen / Handy / cloud prints have no slicer-side
+  metadata path into the dashboard, so grams have to be recovered by
+  FTPS-fetching the .3mf off the printer's SD card after the fact and
+  re-running `inspect_3mf` on it (`printer_dashboard._fetch_grams_for`).
+  That fetch fails often enough that the column on `/jobs` is blank for
+  a noticeable share of rows — the staff workaround is typing the
+  number in manually, but it's tedious and error-prone.
+- **Current distribution (153 rows post-cleanup, 2026-05-20):**
+  - 48% (73) `done` — grams resolved from `orders.json` or via fetch.
+  - 19% (29) `skipped` — no filename to look up.
+  - 31% (47) `failed` — had a filename but the fetch couldn't get it.
+  - <3% (4) `pending` — in queue, will resolve.
+- **Why the two failure buckets exist:**
+  - **Skipped (no filename).** Bambu firmware only puts `subtask_name`
+    on the first one or two `/report` frames of a fresh print; later
+    frames omit it. If the dashboard wasn't connected during that
+    window (service restart, printer powered on before us), the row
+    gets logged with `filename = NULL`. Pure cloud/Handy prints also
+    fall here because nothing arrived on `device/<serial>/request`.
+    Mitigated going forward by the captured-filename persistence
+    shipped in `c84d715`; existing rows stay blank.
+  - **Failed (file unreachable).** We had a filename but the FTPS
+    download came up empty after the 4 × 30 min retry budget. Three
+    flavours:
+    - The .3mf is no longer on the card by the time we tried (Bambu
+      rotates storage; staff clean up). Mostly addressed for new prints
+      by the terminal-transition wake event shipped in `d84c768` —
+      fetch now lands within ms of the print ending, not up to 60s
+      later. Doesn't help historical rows.
+    - Filename mismatch — DB has `Foo.3mf`, card has `Foo.gcode.3mf` or
+      vice versa. The fetcher tries both variants
+      (`printer_dashboard.py:998-1006`); a more mangled form
+      (truncated, sanitized) escapes it.
+    - Bambu Handy / cloud prints sometimes stream gcode directly from
+      the cloud cache without materializing a 3MF the FTPS server can
+      see. The printer prints; the file is unreachable from our side.
+      Genuinely unrecoverable.
+    - Minor: FTPS contention with concurrent uploads/probes (Bambu's
+      single-session-per-creds), usually rides through via retries.
+- **Why the floor is structural:** Bambu doesn't publish filament-grams
+  in MQTT at all — it's a slicer-side computation embedded in the 3MF.
+  So coverage is bounded by (web-intake share) + (FTPS-fetch
+  success rate before storage rotation). Anything that's neither
+  web-intake nor on the SD card when we look is permanently blank
+  until staff types it.
+- **Options for nibbling at the gap, in order of effort:**
+  1. **Better filename-variant search at fetch time.** Today the
+     fetcher tries two suffix variants; add a slug-normalised lookup
+     against the live FTPS LIST so `War-hammer_Reminder_Token.3mf` ↔
+     `War-hammer Reminder Token.gcode.3mf` reconcile. Cheap, would
+     reclaim some of the "failed" bucket. ~30 lines in
+     `_fetch_grams_for`. Stay within objective-fact territory — only
+     match if the normalised form is unambiguously unique on the card,
+     per the no-guessed-data preference.
+  2. **AMS-delta grams as a fallback.** The report frame publishes
+     filament consumption per AMS slot. Sample at print start and end,
+     diff, multiply by filament density. Less precise than the slicer
+     prediction but a real measurement, not a guess. Best for the
+     unrecoverable "cloud-only file" rows where nothing else will
+     ever resolve. Moderate scope; lives in `record_observation` +
+     a new `grams_source` column ('slicer' vs 'ams-delta') so staff
+     can see which they're getting.
+  3. **Move the workflow to web-intake-only.** Closes the gap
+     entirely — every print has slicer metadata at submit time —
+     but is an operational change, not a code change. Folded into
+     the existing Auto-send proposal above.
+- **Not doing (rejected per `feedback_no_guessed_data` memory):** FTPS
+  LIST + mtime heuristic to assume the most-recently-modified .3mf is
+  the running print. Empty cells are preferred over plausibly-wrong
+  ones.
+
+---
+
 ### Other ideas (backlog, not scoped)
 
 These are minor or distant. Each gets a one-liner; expand into a real entry
