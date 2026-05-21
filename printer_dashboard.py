@@ -533,6 +533,24 @@ def _ftps_get_sd_marker(ip: str, access_code: str,
                 pass
 
 
+def _normalize_3mf_slug(name: str) -> str:
+    """Collapse a 3MF filename to a slug used only for unambiguous-match
+    reconciliation against the FTPS LIST. Strips the .3mf / .gcode.3mf
+    extension, lowercases, and squashes any run of non-alphanumerics to
+    a single underscore. So 'War-hammer Reminder Token.gcode.3mf' and
+    'War-hammer_Reminder_Token.3mf' both collapse to
+    'war_hammer_reminder_token'. Per feedback_no_guessed_data: only used
+    where exactly-one-match-on-card is required; a tie returns the same
+    slug and the caller refuses to pick."""
+    import re as _re
+    s = (name or "").strip().lower()
+    for suffix in (".gcode.3mf", ".3mf"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    return _re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+
+
 def _load_sd_card_names() -> dict[str, str]:
     """Friendly names for SD card UUIDs, loaded from sd_cards.json. Missing
     file / parse error returns an empty dict — caller falls back to a
@@ -1122,7 +1140,11 @@ class DashboardHub:
     def _fetch_grams_for(printer_cfg: dict, filename: str) -> float | None:
         """Worker-thread half of _grams_fetch_tick. Tries a couple of
         common naming variations Bambu firmware writes ('foo' vs
-        'foo.3mf' vs 'foo.gcode.3mf') before giving up."""
+        'foo.3mf' vs 'foo.gcode.3mf'); if those all 550, falls back to a
+        slug-normalised LIST lookup so 'Foo_Bar.3mf' reconciles with
+        'Foo Bar.gcode.3mf' etc. Per feedback_no_guessed_data: the LIST
+        fallback only downloads when exactly one card-resident file
+        normalises to the target slug — ambiguous matches stay blank."""
         import os as _os
         import tempfile
         from slice_order import inspect_3mf  # local: avoids circular import
@@ -1144,7 +1166,9 @@ class DashboardHub:
                 candidates.append(variant)
 
         last_err: Exception | None = None
-        for name in candidates:
+
+        def _try(name: str) -> float | None:
+            nonlocal last_err
             fd, tmp = tempfile.mkstemp(suffix=".3mf")
             _os.close(fd)
             tmp_path = Path(tmp)
@@ -1156,19 +1180,47 @@ class DashboardHub:
                     )
                 except Exception as e:
                     last_err = e
-                    continue
+                    return None
                 ins = inspect_3mf(tmp_path)
                 grams = round(
                     sum(p.get("weight_grams", 0.0) for p in ins.get("plates", [])),
                     1,
                 )
-                if grams > 0:
-                    return float(grams)
+                return float(grams) if grams > 0 else None
             finally:
                 try:
                     tmp_path.unlink()
                 except OSError:
                     pass
+
+        for name in candidates:
+            grams = _try(name)
+            if grams is not None:
+                return grams
+
+        # All exact-name candidates 550'd. Pay for a LIST and see if any
+        # .3mf on the card collapses to the same slug as the target —
+        # catches separator / sanitisation mismatches the suffix loop
+        # above can't. Only acts on an unambiguous single match.
+        target_slug = _normalize_3mf_slug(filename)
+        if target_slug:
+            listing: list[dict] = []
+            try:
+                listing = _ftps_list_sd_files(
+                    printer_cfg["ip"], printer_cfg["access_code"],
+                )
+            except Exception as e:
+                last_err = e
+            matches = [
+                r["name"] for r in listing
+                if _normalize_3mf_slug(r["name"]) == target_slug
+                and r["name"] not in candidates
+            ]
+            if len(matches) == 1:
+                grams = _try(matches[0])
+                if grams is not None:
+                    return grams
+
         if last_err:
             raise last_err
         return None
