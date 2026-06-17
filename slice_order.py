@@ -103,6 +103,10 @@ PRINTERS: dict[str, dict] = {
         "machine_json": ORCA_BUNDLE / "machine" / "Bambu Lab X1 Carbon 0.4 nozzle.json",
         "process_base": ORCA_BUNDLE / "process" / "0.24mm Draft @BBL X1C.json",
         "model_id": "BL-P001",
+        # AMS topology for extruder_ams_count (see cmd_slice): 1 external spool
+        # + one 4-slot AMS. Both makerspace X1Cs have a single AMS. Enables the
+        # touchscreen's manual AMS slot mapping on SD prints.
+        "ams_config": "1#0|4#0",
     },
     "p1s": {
         "label": "Bambu Lab P1S",
@@ -656,6 +660,20 @@ def cmd_slice(args) -> None:
     SLICER_OUT.mkdir(parents=True, exist_ok=True)
 
     machine_merged = _resolve_profile(printer_cfg["machine_json"], "machine")
+    # Declare the physical AMS to the slicer. The CLI has no connected AMS, so
+    # it slices "AMS-blind" (extruder_ams_count empty) and the printer then
+    # refuses manual AMS mapping ("model does not support manual AMS mapping").
+    # Injecting the AMS topology (e.g. X1C: "1#0|4#0" = 1 external spool + one
+    # 4-slot AMS) makes the sliced file declare the AMS so the touchscreen
+    # offers slot mapping. Per-printer because it's hardware-specific; printers
+    # with no AMS omit it and stay external-spool-only.
+    ams_cfg = printer_cfg.get("ams_config")
+    if ams_cfg:
+        with machine_merged.open() as _mf:
+            _mdata = json.load(_mf)
+        _mdata["extruder_ams_count"] = [ams_cfg, ""]
+        with machine_merged.open("w") as _mf:
+            json.dump(_mdata, _mf, indent=2)
     process_merged = _resolve_profile(printer_cfg["process_base"], "process", PROCESS_OVERLAY)
     # Bundled P1P process declares compatibility only with "Bambu Lab P1P 0.4
     # nozzle"; OrcaSlicer's loader rejects it as incompatible with P1S unless
