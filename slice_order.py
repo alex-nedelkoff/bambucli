@@ -63,7 +63,12 @@ BASE_DIR = Path(__file__).resolve().parent
 # interactive session or after resolving session-0 GL. The migration is fully
 # implemented and verified interactively (skip-object data survives the 3MF
 # surgery on both X1C and P1S); this flag is the only thing gating it.
-USE_BAMBUSTUDIO = False
+#
+# ENABLED 2026-06-17: the uvicorn service now runs as the logged-in user in an
+# interactive (GPU-capable) session via register-task-user.ps1, so BambuStudio's
+# CLI has the OpenGL context it needs and no longer hangs. Requires the user to
+# stay logged on (enable auto-login for kiosk/unattended use).
+USE_BAMBUSTUDIO = True
 if sys.platform == "win32":
     if USE_BAMBUSTUDIO:
         SLICER_CLI = Path(r"C:\Program Files\Bambu Studio\bambu-studio.exe")

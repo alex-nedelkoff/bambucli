@@ -658,20 +658,22 @@ to an SD card.
 
 ## 9. Lore / gotchas worth remembering
 
-- **Slicer: OrcaSlicer in production; BambuStudio migration implemented but
-  gated (`USE_BAMBUSTUDIO`, default False).** Why migrate: BambuStudio's CLI
-  emits the object-skip data the X1C touchscreen needs — per-object
-  `M624`/`M625` + `; OBJECT_ID` gcode markers and the ID-encoded `pick_1.png`
-  mask — which OrcaSlicer's CLI produces *none* of, regardless of
+- **Slicer: BambuStudio (`USE_BAMBUSTUDIO = True`, enabled 2026-06-17).** Why:
+  BambuStudio's CLI emits the object-skip data the X1C touchscreen needs — per-
+  object `M624`/`M625` + `; OBJECT_ID` gcode markers and the ID-encoded
+  `pick_1.png` mask — which OrcaSlicer's CLI produces *none* of, regardless of
   `exclude_object` / `gcode_label_objects`. The old 02.04 X1C-slice segfault is
-  fixed in 02.07. The code path is complete and verified interactively (skip
-  data survives the 3MF surgery on X1C *and* P1S). **Why it's not on yet — the
-  deployment blocker:** BambuStudio's CLI needs an OpenGL/display context to
-  render those pick/top masks; it hangs when run from the uvicorn service, which
-  runs as SYSTEM in Windows session 0 (no GPU/desktop). OrcaSlicer degrades
-  gracefully there. To ship BambuStudio, run the slicer in a GL-capable session
-  (run the app as the logged-in user instead of SYSTEM, or drop in a software-GL
-  `opengl32.dll`), then flip the flag. Two BambuStudio-CLI quirks already worked
+  fixed in 02.07. Verified end-to-end (skip data survives the 3MF surgery on
+  X1C *and* P1S, via both the CLI and the live `/submit` path). **The GL
+  requirement / why the service runs in the user session:** BambuStudio's CLI
+  needs an OpenGL/display context to render those pick/top masks; it HANGS when
+  run as SYSTEM in Windows session 0 (no GPU/desktop). So the uvicorn service is
+  registered to run as the logged-in user in their interactive session via
+  `register-task-user.ps1` (the SYSTEM-at-boot `register-task.ps1` is the
+  OrcaSlicer-era fallback). Consequence: the app only runs while the user is
+  logged on — enable auto-login for unattended/kiosk use. To revert to
+  OrcaSlicer, flip `USE_BAMBUSTUDIO` to False (and you can move back to the
+  SYSTEM task). Two BambuStudio-CLI quirks already worked
   around in `_make_printable(preserve_native=True)`: its `model_settings.config`
   has malformed XML in per-object blocks (unescaped nested quotes) so we skip
   `_add_thumbnail_refs` and let `_strip_to_print_file` regex-remove those
