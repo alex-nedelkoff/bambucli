@@ -40,15 +40,46 @@ def _fmt_receipt_dt(d: datetime) -> str:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-# Using OrcaSlicer (BambuStudio fork) because BambuStudio 02.04.00.70's CLI
-# segfaults on X1C slice operations — even with its own bundled profiles —
-# due to a missing cli_config.json machine_limits entry for X1 Carbon.
+# Slicer backend selection.
+#
+# History: we ran OrcaSlicer because BambuStudio 02.04.00.70's CLI segfaulted
+# on every X1C slice (missing cli_config.json machine_limits for X1 Carbon).
+# As of BambuStudio 02.07 that's fixed — and BambuStudio's CLI emits the
+# object-skip data the X1C touchscreen needs (per-object M624/M625 + "; OBJECT_ID"
+# gcode markers and the ID-encoded pick_1.png mask), which OrcaSlicer's CLI does
+# NOT produce regardless of exclude_object/gcode_label_objects settings.
+# BambuStudio is also gentler on the X1C flow monitor (see docs/architecture.md
+# "throttle triggers"). Both accept the same CLI flags and their bundled profile
+# trees flatten identically via _resolve_profile.
+#
+# DEPLOYMENT BLOCKER (why this defaults to False): BambuStudio's CLI needs an
+# OpenGL/display context to render the pick/top object-skip masks. It slices
+# fine from an interactive desktop session, but HANGS when run from the
+# production uvicorn service, which runs as SYSTEM in Windows session 0 (no GPU
+# / no desktop). OrcaSlicer's CLI degrades gracefully there (skips GL rendering;
+# we synthesise thumbnails ourselves). Until the slicer runs in a GL-capable
+# session (run the app in the logged-in user's session instead of SYSTEM, or
+# provide a software-GL opengl32.dll), keep this False. Flip to True only in an
+# interactive session or after resolving session-0 GL. The migration is fully
+# implemented and verified interactively (skip-object data survives the 3MF
+# surgery on both X1C and P1S); this flag is the only thing gating it.
+USE_BAMBUSTUDIO = False
 if sys.platform == "win32":
-    SLICER_CLI = Path(r"C:\Program Files\OrcaSlicer\orca-slicer.exe")
-    ORCA_BUNDLE = Path(r"C:\Program Files\OrcaSlicer\resources\profiles\BBL")
+    if USE_BAMBUSTUDIO:
+        SLICER_CLI = Path(r"C:\Program Files\Bambu Studio\bambu-studio.exe")
+        SLICER_BUNDLE = Path(r"C:\Program Files\Bambu Studio\resources\profiles\BBL")
+    else:
+        SLICER_CLI = Path(r"C:\Program Files\OrcaSlicer\orca-slicer.exe")
+        SLICER_BUNDLE = Path(r"C:\Program Files\OrcaSlicer\resources\profiles\BBL")
 else:
-    SLICER_CLI = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-    ORCA_BUNDLE = Path("/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL")
+    if USE_BAMBUSTUDIO:
+        SLICER_CLI = Path("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio")
+        SLICER_BUNDLE = Path("/Applications/BambuStudio.app/Contents/Resources/profiles/BBL")
+    else:
+        SLICER_CLI = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+        SLICER_BUNDLE = Path("/Applications/OrcaSlicer.app/Contents/Resources/profiles/BBL")
+# Back-compat alias: external callers / older imports referenced ORCA_BUNDLE.
+ORCA_BUNDLE = SLICER_BUNDLE
 PRINT_QUEUE = BASE_DIR / "printqueue"
 WORK_DIR = PRINT_QUEUE / "work"
 PROCESS_OVERLAY = BASE_DIR / "process_cli.json"
@@ -420,6 +451,7 @@ def _make_printable(
     date_label: str = "",
     plates_meta: list[dict] | None = None,
     printer_model_id: str = "BL-P001",
+    preserve_native: bool = USE_BAMBUSTUDIO,
 ) -> None:
     """Inject thumbnails + metadata so the X1C printer accepts the 3MF from
     SD card / network transfer. Called after slicing because OrcaSlicer CLI
@@ -459,10 +491,20 @@ def _make_printable(
 
         # Files we rewrite or generate — skip them in the copy pass so retrofits
         # on already-processed 3MFs don't produce duplicate zip entries.
-        rewritten = {"Metadata/model_settings.config", "Metadata/slice_info.config"}
-        generated_pat = re.compile(
-            r"Metadata/(plate_\d+\.png|plate_\d+_small\.png|plate_no_light_\d+\.png|top_\d+\.png|pick_\d+\.png|cut_information\.xml)"
-        )
+        #
+        # preserve_native (BambuStudio): keep the slicer's model_settings.config
+        # (its <plate> block already has correct thumbnail refs; the malformed
+        # <object> blocks get regex-stripped later by _strip_to_print_file) and
+        # keep its top_N/pick_N PNGs — the top-down render + ID-encoded pick mask
+        # the X1C touchscreen needs for skip-object. We still relabel the
+        # SD-browser thumbnails (plate_N / plate_N_small / plate_no_light_N).
+        rewritten = {"Metadata/slice_info.config"}
+        if not preserve_native:
+            rewritten.add("Metadata/model_settings.config")
+        _regen = r"plate_\d+\.png|plate_\d+_small\.png|plate_no_light_\d+\.png|cut_information\.xml"
+        if not preserve_native:
+            _regen += r"|top_\d+\.png|pick_\d+\.png"
+        generated_pat = re.compile(rf"Metadata/({_regen})")
 
         meta_by_plate = {m["plate"]: m for m in (plates_meta or []) if "plate" in m}
         plate_total = len(plate_nums)
@@ -489,8 +531,12 @@ def _make_printable(
                 zout.writestr(f"Metadata/plate_{pn}.png", main_png)
                 zout.writestr(f"Metadata/plate_{pn}_small.png", small_png)
                 zout.writestr(f"Metadata/plate_no_light_{pn}.png", main_png)
-                zout.writestr(f"Metadata/top_{pn}.png", main_png)
-                zout.writestr(f"Metadata/pick_{pn}.png", main_png)
+                if not preserve_native:
+                    # OrcaSlicer: top/pick are plain renders we replace with the
+                    # label. BambuStudio: they carry the skip-object render + ID
+                    # mask, so they were copied through untouched in the pass above.
+                    zout.writestr(f"Metadata/top_{pn}.png", main_png)
+                    zout.writestr(f"Metadata/pick_{pn}.png", main_png)
 
             if "Metadata/cut_information.xml" not in members:
                 zout.writestr(
@@ -498,10 +544,13 @@ def _make_printable(
                     '<?xml version="1.0" encoding="utf-8"?>\n<objects>\n</objects>\n',
                 )
 
-            zout.writestr(
-                "Metadata/model_settings.config",
-                _add_thumbnail_refs(model_settings, plate_nums),
-            )
+            if not preserve_native:
+                # OrcaSlicer needs thumbnail refs injected; BambuStudio's
+                # model_settings.config already has them (copied through above).
+                zout.writestr(
+                    "Metadata/model_settings.config",
+                    _add_thumbnail_refs(model_settings, plate_nums),
+                )
             if slice_info:
                 zout.writestr(
                     "Metadata/slice_info.config",

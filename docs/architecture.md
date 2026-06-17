@@ -658,10 +658,26 @@ to an SD card.
 
 ## 9. Lore / gotchas worth remembering
 
-- **OrcaSlicer, not BambuStudio.** BambuStudio's CLI segfaults on every X1C
-  slice in its own bundled profiles (missing `machine_limits` for X1C). Don't
-  "fix" the pipeline to use BambuStudio. If a future BambuStudio (02.05+)
-  fixes its CLI, you can revisit.
+- **Slicer: OrcaSlicer in production; BambuStudio migration implemented but
+  gated (`USE_BAMBUSTUDIO`, default False).** Why migrate: BambuStudio's CLI
+  emits the object-skip data the X1C touchscreen needs — per-object
+  `M624`/`M625` + `; OBJECT_ID` gcode markers and the ID-encoded `pick_1.png`
+  mask — which OrcaSlicer's CLI produces *none* of, regardless of
+  `exclude_object` / `gcode_label_objects`. The old 02.04 X1C-slice segfault is
+  fixed in 02.07. The code path is complete and verified interactively (skip
+  data survives the 3MF surgery on X1C *and* P1S). **Why it's not on yet — the
+  deployment blocker:** BambuStudio's CLI needs an OpenGL/display context to
+  render those pick/top masks; it hangs when run from the uvicorn service, which
+  runs as SYSTEM in Windows session 0 (no GPU/desktop). OrcaSlicer degrades
+  gracefully there. To ship BambuStudio, run the slicer in a GL-capable session
+  (run the app as the logged-in user instead of SYSTEM, or drop in a software-GL
+  `opengl32.dll`), then flip the flag. Two BambuStudio-CLI quirks already worked
+  around in `_make_printable(preserve_native=True)`: its `model_settings.config`
+  has malformed XML in per-object blocks (unescaped nested quotes) so we skip
+  `_add_thumbnail_refs` and let `_strip_to_print_file` regex-remove those
+  blocks; and it writes the skip masks into the same `top_N`/`pick_N` slots the
+  makerspace labels use, so preserve_native keeps the slicer's PNGs and only
+  relabels `plate_N` (the SD-browser thumbnail).
 - **Strip `inherits`, keep `setting_id` + `instantiation`.** Stripping all
   three breaks the printer↔process compatibility check.
 - **GUI-exported profiles miss `"type"`.** Add it before merging or the CLI

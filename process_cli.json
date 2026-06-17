@@ -7,6 +7,7 @@
     ],
     "enable_support": "1",
     "support_type": "tree(auto)",
+    "exclude_object": "1",
     "sparse_infill_density": "15%",
     "sparse_infill_pattern": "grid",
     "brim_type": "no_brim",
