@@ -444,7 +444,8 @@ def _build_record(
         "total_grams": total_mass,
         "total_time_seconds": total_time,
         "total_time_label": _fmt_time(total_time),
-        "price_cad": round(total_mass * PRICE_PER_GRAM, 2),
+        # Staff prints (card == "STAFF") are free; grams/time still recorded.
+        "price_cad": 0.0 if card.strip().upper() == "STAFF" else round(total_mass * PRICE_PER_GRAM, 2),
         "any_over_5h": any(p.get("prediction_seconds", 0) > 5 * 3600 for p in plates),
         "any_outside_bed": any(p.get("outside", False) for p in plates),
         "file_filaments": file_filaments,
@@ -501,7 +502,11 @@ async def submit(
     request: Request,
     intake: str = Form(...),
     customer: str = Form(...),
-    card: str = Form(...),
+    # Optional: empty/absent when the "Staff print" toggle is on (see `staff`).
+    card: str = Form(""),
+    # "Staff print" flag from the intake form. When truthy we bypass the
+    # library-card requirement and stamp the card as "STAFF".
+    staff: str = Form(""),
     # `colors` is required for slice flow (validated below) but empty for import,
     # so it has to be optional at the schema level.
     colors: str = Form(""),
@@ -521,6 +526,15 @@ async def submit(
     files = [f for f in files if f.filename]
     if not files:
         raise HTTPException(400, "at least one file required")
+
+    # Staff prints bypass the library-card requirement — the front-end "Staff
+    # print" toggle disables the card field and sends staff=1. Stamp the card
+    # as "STAFF" so it's flagged in the ledger + on the receipt rather than a
+    # placeholder number. Non-staff orders still require a card.
+    if staff.strip().lower() in ("1", "true", "on", "yes"):
+        card = "STAFF"
+    elif not card.strip():
+        raise HTTPException(400, "library card required (or check 'Staff print')")
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     first = customer.strip().split()[0] if customer.strip() else "unknown"

@@ -49,6 +49,13 @@
   </div>
 
   <div class="field">
+    <label class="staff-toggle" style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer;">
+      <input type="checkbox" id="staff-print" name="staff" value="1" style="width:auto; margin:0;">
+      <span>Staff print — no library card</span>
+    </label>
+  </div>
+
+  <div class="field" id="card-field">
     <label for="card">Library card (14 digits)</label>
     <input id="card" name="card" pattern="[0-9 ]{14,}" required autocomplete="off"
            placeholder="29342503188115 or 293425 0318 8115">
@@ -106,6 +113,22 @@
   const table      = document.getElementById('uploads-table');
   const form       = document.getElementById('intake-form');
   const radios     = document.querySelectorAll('input[name="intake"]');
+
+  // Staff print toggle: when on, the library-card field is hidden, cleared,
+  // and made non-required (a disabled input isn't submitted, so the backend
+  // stamps card="STAFF" off the staff=1 flag instead).
+  const staffChk  = document.getElementById('staff-print');
+  const cardField = document.getElementById('card-field');
+  const cardInput = document.getElementById('card');
+  function syncStaff() {
+    const on = staffChk.checked;
+    cardInput.disabled = on;
+    cardInput.required = !on;
+    if (on) cardInput.value = '';
+    cardField.style.display = on ? 'none' : '';
+  }
+  staffChk.addEventListener('change', syncStaff);
+  syncStaff();
 
   function isSlice() {
     const v = document.querySelector('input[name="intake"]:checked').value;

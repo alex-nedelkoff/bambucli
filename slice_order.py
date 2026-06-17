@@ -1513,6 +1513,16 @@ def _circle_initials_line(indent: int = 2) -> str:
 PRICE_PER_GRAM = 0.05  # CAD, library's current rate
 DEFAULT_ORDER_TAKEN_BY = "Alex"  # CLI / API fallback when no staff is picked
 
+# Staff prints carry the sentinel card "STAFF" (set by the web intake's
+# "Staff print" toggle). They're free of charge, but grams/time are still
+# recorded as usage metrics. Centralised so the ledger and both receipt
+# renderers agree on what counts as a staff (free) order.
+STAFF_CARD = "STAFF"
+
+
+def _is_staff_card(card: str) -> bool:
+    return (card or "").strip().upper() == STAFF_CARD
+
 
 def _format_card(raw: str) -> str:
     """Library cards are 14 digits; display grouped 6-4-4 per the library's
@@ -1629,13 +1639,18 @@ def _render_receipt_text(
             lines.append("")  # blank line between plates
 
     lines.append(thin)
-    lines.append(f"  Total:      ${price:.2f}")
+    if _is_staff_card(card):
+        lines.append("  Total:      FREE (staff)")
+    else:
+        lines.append(f"  Total:      ${price:.2f}")
     lines.append(f"  Total mass: {total_mass_g:.1f} g")
     lines.append(f"  Total time: {_fmt_time(total_time_s)}")
     lines.append("")
     lines.append(sep)
     lines.append(f"  Order taken by: {order_taken_by or DEFAULT_ORDER_TAKEN_BY}")
-    lines.append(_box_label("Charged in Koha"))
+    # Staff prints are free — nothing to charge in Koha, so omit that checkbox.
+    if not _is_staff_card(card):
+        lines.append(_box_label("Charged in Koha"))
     # "Completed by:" now uses circle-able initials instead of an
     # underline so staff can sign off without a pen-on-the-line.
     lines.append("  Completed by:")
@@ -1794,14 +1809,19 @@ def _send_to_tm_t88v(
 
     p.text(thin + "\n")
     p.set(font="b", bold=True)
-    p.text(f"  Total:      ${price:.2f}\n")
+    if _is_staff_card(card):
+        p.text("  Total:      FREE (staff)\n")
+    else:
+        p.text(f"  Total:      ${price:.2f}\n")
     p.set(font="b", bold=False)
     p.text(f"  Total mass: {total_mass_g:.1f} g\n")
     p.text(f"  Total time: {_fmt_time(total_time_s)}\n")
     p.text("\n")
     p.text(sep + "\n")
     p.text(f"  Order taken by: {order_taken_by or DEFAULT_ORDER_TAKEN_BY}\n")
-    p.text(_box_label("Charged in Koha") + "\n")
+    # Staff prints are free — nothing to charge in Koha, so omit that checkbox.
+    if not _is_staff_card(card):
+        p.text(_box_label("Charged in Koha") + "\n")
     # Circle-able initials replace the old "Completed by: ___________"
     # signature line. Blank lines bracket the initials so the pen has
     # vertical room to draw a clean circle.
@@ -1841,7 +1861,8 @@ def cmd_receipt(args) -> None:
     total_time_s = sum(p.get("prediction_seconds", 0) for p in plates)
     total_mass_g = round(sum(p.get("weight_grams", 0.0) for p in plates), 1)
 
-    price = round(total_mass_g * PRICE_PER_GRAM, 2)
+    # Staff prints are free; everyone else pays by mass.
+    price = 0.0 if _is_staff_card(args.card) else round(total_mass_g * PRICE_PER_GRAM, 2)
     when = datetime.now()
 
     # --color accepts a single colour ("Purple") that broadcasts to all plates
