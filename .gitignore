@@ -11,11 +11,17 @@ printers.json
 # in a hidden marker file; this just maps them to operational labels.
 sd_cards.json
 
-# Live camera snapshots (overwritten every minute by printer_dashboard).
+# Live camera snapshots (overwritten on the printer_dashboard snapshot loop).
 snapshots/
 
 # Runtime cache (merged profile JSONs regenerated on each slice)
 .cache/
+
+# Slicer CLI scratch output (written to repo root on each slice)
+result.json
+
+# Dashboard runtime state (per-printer capture flags, rewritten live)
+printer_capture_state.json
 
 # Python
 __pycache__/

@@ -194,6 +194,16 @@
   const lastSnap  = new Map();  // id -> snap
   const grid      = document.getElementById('dash-grid');
 
+  // Camera refresh is decoupled from the WS/MQTT render cycle. The backend
+  // writes a fresh JPEG every SNAPSHOT_INTERVAL_SEC, but renders only fire on
+  // MQTT deltas — so an idle printer's tile would otherwise hold a stale frame
+  // until the next state change. `camBust` is a cache-buster bumped on its own
+  // timer (below); render() stamps it into the <img> src, and the timer also
+  // repoints existing <img> tags so the picture advances even with no WS
+  // traffic. The /snapshot route sends no-store, so each new URL pulls the
+  // latest frame off disk.
+  let camBust = 0;
+
   function camLabelFor(snap) {
     const seq = snap.snapshot_seq ?? 0;
     const prev = camLabels.get(snap.id);
@@ -314,7 +324,7 @@
       camHtml = `
         <div class="cam-wrap">
           ${snap.snapshot_ok
-            ? `<img src="/snapshot/${snap.id}.jpg?v=${snap.snapshot_seq ?? 0}" alt="" onerror="this.style.display='none'">
+            ? `<img data-cam="${snap.id}" src="/snapshot/${snap.id}.jpg?v=${camBust}" alt="" onerror="this.style.display='none'">
                <div class="cam-stamp">cam · ${camLabelFor(snap)}</div>`
             : `<span class="cam-empty">${snap.snapshot_error ? 'camera: ' + snap.snapshot_error : 'waiting for camera…'}</span>`}
         </div>`;
@@ -401,5 +411,18 @@
       if (!snap.online && snap.disconnected_at) render(snap);
     }
   }, 5000);
+
+  // Advance the camera frames independently of WS traffic. Every tick we bump
+  // the cache-buster and repoint each live <img> at the new URL, which forces
+  // the browser past its in-memory image cache to refetch the latest JPEG.
+  // Resetting display:'' lets a tile that errored on a transient miss recover.
+  setInterval(() => {
+    camBust++;
+    for (const img of document.querySelectorAll('img[data-cam]')) {
+      const id = img.getAttribute('data-cam');
+      img.style.display = '';
+      img.src = `/snapshot/${id}.jpg?v=${camBust}`;
+    }
+  }, 8000);
 </script>
 {% endblock %}

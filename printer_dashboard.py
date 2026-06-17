@@ -38,13 +38,13 @@ from fastapi.templating import Jinja2Templates
 import jobs_db
 
 # Resolved once at import — get_ffmpeg_exe() does filesystem probes and we
-# call _grab_snapshot once per minute per printer. No reason to re-probe.
+# call _grab_snapshot every SNAPSHOT_INTERVAL_SEC per printer. No reason to re-probe.
 _FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
 
 BASE_DIR = Path(__file__).resolve().parent
 PRINTERS_JSON = BASE_DIR / "printers.json"
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
-SNAPSHOT_INTERVAL_SEC = 60
+SNAPSHOT_INTERVAL_SEC = 20
 # How often the FTPS-based SD-card marker probe refreshes. Cards only
 # change when a human swaps one between printers, which is rare — 5 min
 # is plenty fast for the receipt auto-fill to be right, and we also
