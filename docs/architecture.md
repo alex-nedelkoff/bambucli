@@ -658,23 +658,27 @@ to an SD card.
 
 ## 9. Lore / gotchas worth remembering
 
-- **Slicer: BambuStudio (`USE_BAMBUSTUDIO = True`, enabled 2026-06-17).** Why:
-  BambuStudio's CLI emits the object-skip data the X1C touchscreen needs — per-
-  object `M624`/`M625` + `; OBJECT_ID` gcode markers and the ID-encoded
-  `pick_1.png` mask — which OrcaSlicer's CLI produces *none* of, regardless of
-  `exclude_object` / `gcode_label_objects`. The old 02.04 X1C-slice segfault is
-  fixed in 02.07. Verified end-to-end (skip data survives the 3MF surgery on
-  X1C *and* P1S, via both the CLI and the live `/submit` path). **The GL
-  requirement / why the service runs in the user session:** BambuStudio's CLI
-  needs an OpenGL/display context to render those pick/top masks; it HANGS when
-  run as SYSTEM in Windows session 0 (no GPU/desktop). So the uvicorn service is
-  registered to run as the logged-in user in their interactive session via
-  `register-task-user.ps1` (the SYSTEM-at-boot `register-task.ps1` is the
-  OrcaSlicer-era fallback). Consequence: the app only runs while the user is
-  logged on — enable auto-login for unattended/kiosk use. To revert to
-  OrcaSlicer, flip `USE_BAMBUSTUDIO` to False (and you can move back to the
-  SYSTEM task). Two BambuStudio-CLI quirks already worked
-  around in `_make_printable(preserve_native=True)`: its `model_settings.config`
+- **Slicer: OrcaSlicer (`USE_BAMBUSTUDIO = False`). AMS beats skip-objects.**
+  The two CLIs are mutually exclusive and each wins one feature:
+  - **OrcaSlicer** defaults the filament to the AMS (`M620 S0A ; switch material
+    if AMS exist`), so **manual AMS slot mapping works** on the touchscreen — the
+    everyday makerspace workflow. But its CLI emits **no** object-skip data.
+  - **BambuStudio** emits the object-skip data (`M624`/`M625` + `; OBJECT_ID`
+    markers + the ID-encoded `pick_1.png` mask) so the touchscreen **skip-objects**
+    view works — but its CLI defaults the filament to the **external spool**
+    (`M620 S255` / `T255`), which **breaks AMS** ("does not support manual AMS
+    mapping"). `extruder_ams_count` injection does not fix this; the load/unload
+    gcode differs structurally (0- vs 1-based filament indexing), so there's no
+    safe rewrite and no settable flag.
+  We chose AMS, so `USE_BAMBUSTUDIO = False`. The BambuStudio path is kept intact
+  behind the flag — flip to True (in a GPU-capable session, see below) to trade
+  AMS for skip-objects. **GL note for the BambuStudio path:** its CLI needs an
+  OpenGL context to render the pick/top masks and HANGS as a SYSTEM session-0
+  service, so it was run via `register-task-user.ps1` (logged-in user session).
+  OrcaSlicer has no such requirement, so with the flag False the service can run
+  SYSTEM-at-boot again (`register-task.ps1`). When on the BambuStudio path, two
+  CLI quirks are worked around in `_make_printable(preserve_native=True)`: its
+  `model_settings.config`
   has malformed XML in per-object blocks (unescaped nested quotes) so we skip
   `_add_thumbnail_refs` and let `_strip_to_print_file` regex-remove those
   blocks; and it writes the skip masks into the same `top_N`/`pick_N` slots the

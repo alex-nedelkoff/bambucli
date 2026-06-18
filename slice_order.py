@@ -64,11 +64,18 @@ BASE_DIR = Path(__file__).resolve().parent
 # implemented and verified interactively (skip-object data survives the 3MF
 # surgery on both X1C and P1S); this flag is the only thing gating it.
 #
-# ENABLED 2026-06-17: the uvicorn service now runs as the logged-in user in an
-# interactive (GPU-capable) session via register-task-user.ps1, so BambuStudio's
-# CLI has the OpenGL context it needs and no longer hangs. Requires the user to
-# stay logged on (enable auto-login for kiosk/unattended use).
-USE_BAMBUSTUDIO = True
+# REVERTED TO ORCASLICER 2026-06-17: BambuStudio's CLI defaults the filament to
+# the EXTERNAL SPOOL (emits "M620 S255 / T255"), which breaks AMS slot selection
+# — the printer reports "does not support manual AMS mapping". OrcaSlicer's CLI
+# defaults to the AMS ("M620 S0A ; switch material if AMS exist"), so manual AMS
+# mapping on the touchscreen works. The two slicers' load/unload gcode differs
+# structurally (different commands, 0- vs 1-based filament indexing), so there's
+# no safe automatic rewrite, and it's not a settable flag. AMS slot selection is
+# the everyday workflow, so OrcaSlicer wins. Cost: OrcaSlicer's CLI does NOT emit
+# object-skip data, so the touchscreen "skip objects" feature is unavailable on
+# this path. The BambuStudio code below is kept intact and gated by this flag —
+# flip to True (in a GPU-capable session) to trade AMS for skip-objects.
+USE_BAMBUSTUDIO = False
 if sys.platform == "win32":
     if USE_BAMBUSTUDIO:
         SLICER_CLI = Path(r"C:\Program Files\Bambu Studio\bambu-studio.exe")
