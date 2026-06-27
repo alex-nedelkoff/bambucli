@@ -816,35 +816,65 @@ table.uploads .inspecting-cell {
   font-size: 13px;
 }
 
-/* ---------- Filaments tab ---------- */
-.filaments-table td { vertical-align: middle; }
-.fil-swatch {
-  display: inline-block;
-  width: 26px; height: 26px;
-  border-radius: 4px;
+/* ---------- Filaments tab (grid of colour cards) ---------- */
+.filaments-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+.fil-card {
+  position: relative;
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 12px;
+  background: var(--card-bg);
   border: 1px solid var(--border);
-  flex-shrink: 0;
+  border-radius: 10px;
 }
-.fil-hex-cell { white-space: nowrap; }
-.fil-hex-cell .fil-color,
-.fil-hex-cell #add-color {
-  width: 30px; height: 26px; padding: 0;
-  border: 1px solid var(--border); border-radius: 4px;
-  background: none; cursor: pointer; vertical-align: middle;
+.fil-delete {
+  position: absolute; top: 7px; right: 7px;
+  width: 22px; height: 22px; line-height: 20px; text-align: center;
+  border: none; border-radius: 50%;
+  background: rgba(0,0,0,0.06); color: var(--muted);
+  cursor: pointer; font-size: 12px; padding: 0;
 }
-.fil-hex, #add-hex {
-  width: 6em; font-family: ui-monospace, Menlo, Consolas, monospace;
+.fil-delete:hover { background: var(--orange); color: #fff; }
+.fil-swatch-lg {
+  position: relative; display: block;
+  width: 100%; aspect-ratio: 1 / 1;
+  border-radius: 8px; border: 1px solid var(--border);
+  cursor: pointer; overflow: hidden;
+}
+.fil-swatch-lg input[type="color"] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer; border: none; padding: 0; background: none;
+}
+.fil-name { font-weight: 600; font-size: 14px; line-height: 1.25; }
+.custom-tag {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  background: var(--bg); padding: 1px 5px; border-radius: 6px; vertical-align: middle;
+}
+.fil-hexrow { display: flex; align-items: center; gap: 6px; }
+.fil-hex {
+  flex: 1; min-width: 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 12px; text-transform: uppercase;
   padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
-  vertical-align: middle; margin: 0 4px;
 }
-#add-name {
-  width: 11em; padding: 4px 6px;
-  border: 1px solid var(--border); border-radius: 4px;
+.fil-reset { padding: 2px 6px; line-height: 1; }
+.fil-status {
+  font-family: inherit; font-size: 13px; padding: 5px 6px;
+  border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer;
 }
-.fil-reset { padding: 2px 7px; }
-.fil-add-row td { border-top: 2px solid var(--border); padding-top: 10px; }
-.fil-status { margin-left: 6px; font-size: 12px; }
+.fil-status.status-in  { border-color: #2e9e5b; color: #1e7a43; background: #f3fbf6; }
+.fil-status.status-low { border-color: var(--orange); color: #b85c00; background: #fff7ef; }
+.fil-status.status-out { color: var(--muted); }
+.fil-status-msg { font-size: 12px; min-height: 14px; }
+.fil-add-card { border-style: dashed; justify-content: flex-start; }
+.fil-add-name {
+  font-size: 13px; padding: 5px 6px;
+  border: 1px solid var(--border); border-radius: 4px; width: 100%;
+}
 
 /* ---------- Dashboard in-stock panel ---------- */
 .stock-panel {

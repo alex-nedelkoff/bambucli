@@ -3,131 +3,123 @@
 {% block content %}
 <div class="card">
   <h2>Filaments</h2>
-  <p class="hint">Manage the colour swatches used on print labels and the in-stock list shown on the
-    <a href="/dashboard">dashboard</a>. Tick <strong>On hand</strong> for colours you currently
-    stock (toggles save instantly), and <strong>Low</strong> when a spool is running out. Override a
-    swatch colour with the picker, or add your own with <em>+ Add</em>. Names match what staff type
-    in the colour field on a new order.</p>
+  <p class="hint">Manage the colour swatches used on print labels and the in-stock list on the
+    <a href="/dashboard">dashboard</a>. Click a swatch to recolour it (or type a hex), and pick a
+    stock status from the dropdown — changes save automatically. Add your own with the
+    <em>+ Add</em> tile. Names match what staff type in the colour field on a new order.</p>
 
-  <table class="plates filaments-table">
-    <thead>
-      <tr>
-        <th></th><th>Name</th><th>Swatch colour</th>
-        <th style="text-align:center;">On hand</th>
-        <th style="text-align:center;">Low</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody id="fil-body">
-      {% for it in items %}
-      <tr data-name="{{ it.name }}" data-default="{{ it.default_hex }}">
-        <td><span class="fil-swatch" style="background: {{ it.hex }};"></span></td>
-        <td>{{ it.name }}{% if not it.is_default %} <span class="muted" style="font-size:11px;">(custom)</span>{% endif %}</td>
-        <td class="fil-hex-cell">
-          <input type="color" class="fil-color" value="{{ it.hex }}">
-          <input type="text" class="fil-hex" value="{{ it.hex }}" maxlength="7" spellcheck="false">
-          <button type="button" class="button-mini fil-reset" title="Reset to default {{ it.default_hex }}"
-                  {% if it.hex|upper == it.default_hex|upper %}style="visibility:hidden;"{% endif %}>↺</button>
-        </td>
-        <td style="text-align:center;"><input type="checkbox" class="fil-onhand"{% if it.on_hand %} checked{% endif %}></td>
-        <td style="text-align:center;"><input type="checkbox" class="fil-low"{% if it.low %} checked{% endif %}></td>
-        <td>
-          <button type="button" class="button-mini fil-save">Save</button>
-          <button type="button" class="button-mini fil-delete" title="Remove from list">✕</button>
-          <span class="fil-status"></span>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-    <tfoot>
-      <tr class="fil-add-row">
-        <td><span class="fil-swatch" id="add-swatch" style="background:#888888;"></span></td>
-        <td><input type="text" id="add-name" placeholder="New colour name" maxlength="40"></td>
-        <td class="fil-hex-cell">
-          <input type="color" id="add-color" value="#888888">
-          <input type="text" id="add-hex" value="#888888" maxlength="7" spellcheck="false">
-        </td>
-        <td></td><td></td>
-        <td><button type="button" class="button-mini" id="add-btn">+ Add</button>
-            <span id="add-status" class="fil-status"></span></td>
-      </tr>
-    </tfoot>
-  </table>
+  <div class="filaments-grid">
+    {% for it in items %}
+    {% set status = 'low' if (it.on_hand and it.low) else ('in' if it.on_hand else 'out') %}
+    <div class="fil-card" data-name="{{ it.name }}" data-default="{{ it.default_hex }}">
+      <button type="button" class="fil-delete" title="Remove from list">✕</button>
+      <label class="fil-swatch-lg" style="background: {{ it.hex }};">
+        <input type="color" class="fil-color" value="{{ it.hex }}">
+      </label>
+      <div class="fil-name">{{ it.name }}{% if not it.is_default %} <span class="custom-tag">custom</span>{% endif %}</div>
+      <div class="fil-hexrow">
+        <input type="text" class="fil-hex" value="{{ it.hex }}" maxlength="7" spellcheck="false">
+        <button type="button" class="fil-reset" title="Reset to default {{ it.default_hex }}"
+                {% if it.hex|upper == it.default_hex|upper %}style="visibility:hidden;"{% endif %}>↺</button>
+      </div>
+      <select class="fil-status status-{{ status }}">
+        <option value="out"{% if status == 'out' %} selected{% endif %}>Out of stock</option>
+        <option value="in"{% if status == 'in' %} selected{% endif %}>In stock</option>
+        <option value="low"{% if status == 'low' %} selected{% endif %}>Low stock</option>
+      </select>
+      <span class="fil-status-msg"></span>
+    </div>
+    {% endfor %}
+
+    <div class="fil-card fil-add-card">
+      <label class="fil-swatch-lg" style="background:#888888;">
+        <input type="color" id="add-color" value="#888888">
+      </label>
+      <input type="text" id="add-name" class="fil-add-name" placeholder="New colour name" maxlength="40">
+      <div class="fil-hexrow">
+        <input type="text" id="add-hex" class="fil-hex" value="#888888" maxlength="7" spellcheck="false">
+      </div>
+      <button type="button" class="button-mini" id="add-btn">+ Add</button>
+      <span id="add-status" class="fil-status-msg"></span>
+    </div>
+  </div>
 </div>
 
 <script>
 (function () {
   const HEX = /^#[0-9A-Fa-f]{6}$/;
   const norm = h => { h = (h || '').trim(); if (h && h[0] !== '#') h = '#' + h; return h; };
+  // Dropdown value -> (on_hand, low) for the upsert API.
+  const STATUS = { out: [false, false], in: [true, false], low: [true, true] };
 
-  async function upsert(name, hex, onHand, low, statusEl) {
-    if (!HEX.test(hex)) { if (statusEl) { statusEl.textContent = 'bad hex'; statusEl.className = 'fil-status error-msg'; } return false; }
+  async function upsert(name, hex, onHand, low, msgEl) {
+    if (!HEX.test(hex)) { if (msgEl) { msgEl.textContent = 'bad hex'; msgEl.className = 'fil-status-msg error-msg'; } return false; }
     const fd = new FormData();
     fd.append('name', name); fd.append('color_hex', hex);
     fd.append('on_hand', onHand ? '1' : '0'); fd.append('low', low ? '1' : '0');
-    if (statusEl) { statusEl.textContent = '…'; statusEl.className = 'fil-status'; }
+    if (msgEl) { msgEl.textContent = '…'; msgEl.className = 'fil-status-msg'; }
     try {
       const r = await fetch('/api/filaments/upsert', { method: 'POST', body: fd });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      if (statusEl) { statusEl.textContent = '✓'; statusEl.className = 'fil-status success-msg'; }
+      if (msgEl) { msgEl.textContent = '✓'; msgEl.className = 'fil-status-msg success-msg'; }
       return true;
     } catch (e) {
-      if (statusEl) { statusEl.textContent = 'failed'; statusEl.className = 'fil-status error-msg'; }
+      if (msgEl) { msgEl.textContent = 'failed'; msgEl.className = 'fil-status-msg error-msg'; }
       return false;
     }
   }
 
-  function vals(tr) {
+  function vals(card) {
+    const [onHand, low] = STATUS[card.querySelector('.fil-status').value] || [false, false];
     return {
-      name: tr.dataset.name,
-      hex: norm(tr.querySelector('.fil-hex').value),
-      onHand: tr.querySelector('.fil-onhand').checked,
-      low: tr.querySelector('.fil-low').checked,
-      status: tr.querySelector('.fil-status'),
+      name: card.dataset.name, hex: norm(card.querySelector('.fil-hex').value),
+      onHand, low, msg: card.querySelector('.fil-status-msg'),
     };
   }
 
-  document.querySelectorAll('#fil-body tr').forEach(tr => {
-    const color = tr.querySelector('.fil-color'),
-          hex = tr.querySelector('.fil-hex'),
-          sw = tr.querySelector('.fil-swatch'),
-          reset = tr.querySelector('.fil-reset');
+  document.querySelectorAll('.fil-card:not(.fil-add-card)').forEach(card => {
+    const color = card.querySelector('.fil-color'), hex = card.querySelector('.fil-hex'),
+          sw = card.querySelector('.fil-swatch-lg'), reset = card.querySelector('.fil-reset'),
+          sel = card.querySelector('.fil-status');
     const preview = () => { const h = norm(hex.value); if (HEX.test(h)) sw.style.background = h; };
+    const saveHex = () => { const v = vals(card); if (HEX.test(v.hex)) upsert(v.name, v.hex, v.onHand, v.low, v.msg); };
     color.addEventListener('input', () => { hex.value = color.value; preview(); reset.style.visibility = ''; });
+    color.addEventListener('change', saveHex);
     hex.addEventListener('input', () => { const h = norm(hex.value); if (HEX.test(h)) color.value = h; preview(); reset.style.visibility = ''; });
-    const save = () => { const v = vals(tr); upsert(v.name, v.hex, v.onHand, v.low, v.status); };
-    tr.querySelector('.fil-onhand').addEventListener('change', save);
-    tr.querySelector('.fil-low').addEventListener('change', save);
-    tr.querySelector('.fil-save').addEventListener('click', save);
-    reset.addEventListener('click', () => {
-      const d = tr.dataset.default;
-      hex.value = d; color.value = d; preview(); reset.style.visibility = 'hidden';
-      const v = vals(tr); upsert(v.name, d, v.onHand, v.low, v.status);
+    hex.addEventListener('change', saveHex);
+    sel.addEventListener('change', () => {
+      sel.className = 'fil-status status-' + sel.value;
+      const v = vals(card); upsert(v.name, v.hex, v.onHand, v.low, v.msg);
     });
-    tr.querySelector('.fil-delete').addEventListener('click', async () => {
-      if (!confirm('Remove "' + tr.dataset.name + '" from the list?')) return;
-      const fd = new FormData(); fd.append('name', tr.dataset.name);
+    reset.addEventListener('click', () => {
+      const d = card.dataset.default;
+      hex.value = d; color.value = d; preview(); reset.style.visibility = 'hidden';
+      const v = vals(card); upsert(v.name, d, v.onHand, v.low, v.msg);
+    });
+    card.querySelector('.fil-delete').addEventListener('click', async () => {
+      if (!confirm('Remove "' + card.dataset.name + '" from the list?')) return;
+      const fd = new FormData(); fd.append('name', card.dataset.name);
       try {
         const r = await fetch('/api/filaments/delete', { method: 'POST', body: fd });
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        tr.remove();
+        card.remove();
       } catch (e) {
-        const s = tr.querySelector('.fil-status'); s.textContent = 'failed'; s.className = 'fil-status error-msg';
+        const m = card.querySelector('.fil-status-msg'); m.textContent = 'failed'; m.className = 'fil-status-msg error-msg';
       }
     });
   });
 
-  // Add-new row
+  // Add-new tile
   const aName = document.getElementById('add-name'), aColor = document.getElementById('add-color'),
-        aHex = document.getElementById('add-hex'), aSw = document.getElementById('add-swatch'),
-        aStatus = document.getElementById('add-status');
+        aHex = document.getElementById('add-hex'), aStatus = document.getElementById('add-status'),
+        aSw = aColor.closest('.fil-swatch-lg');
   const aPrev = () => { const h = norm(aHex.value); if (HEX.test(h)) aSw.style.background = h; };
   aColor.addEventListener('input', () => { aHex.value = aColor.value; aPrev(); });
   aHex.addEventListener('input', () => { const h = norm(aHex.value); if (HEX.test(h)) aColor.value = h; aPrev(); });
   document.getElementById('add-btn').addEventListener('click', async () => {
     const name = aName.value.trim();
-    if (!name) { aStatus.textContent = 'name?'; aStatus.className = 'fil-status error-msg'; return; }
-    // New colours default to on-hand (you're adding it because you have it).
+    if (!name) { aStatus.textContent = 'name?'; aStatus.className = 'fil-status-msg error-msg'; return; }
+    // New colours default to in-stock (you're adding it because you have it).
     const ok = await upsert(name, norm(aHex.value), true, false, aStatus);
     if (ok) { aStatus.textContent = '✓ added'; setTimeout(() => location.reload(), 350); }
   });
