@@ -13,7 +13,7 @@
     {% set status = 'low' if (it.on_hand and it.low) else ('in' if it.on_hand else 'out') %}
     <div class="fil-card" data-name="{{ it.name }}" data-default="{{ it.default_hex }}">
       <button type="button" class="fil-delete" title="Remove from list">✕</button>
-      <label class="fil-swatch-lg" style="background: {{ it.hex }};">
+      <label class="fil-swatch-lg{% if 'silk' in it.name|lower %} silk{% endif %}" style="background: {{ it.hex }};">
         <input type="color" class="fil-color" value="{{ it.hex }}">
       </label>
       <input type="text" class="fil-name" value="{{ it.name }}" maxlength="40" spellcheck="false"

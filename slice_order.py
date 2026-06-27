@@ -493,6 +493,32 @@ def _draw_hue_gradient(img, x0: int, y0: int, x1: int, y1: int) -> None:
                fill=(int(r * 255), int(g * 255), int(b * 255)))
 
 
+def _draw_sparkle(d, cx: float, cy: float, r: float) -> None:
+    """A 4-point sparkle/twinkle: two tapered white diamonds + a bright core."""
+    d.polygon([(cx, cy - r), (cx + r * 0.22, cy), (cx, cy + r), (cx - r * 0.22, cy)], fill=(255, 255, 255, 235))
+    d.polygon([(cx - r, cy), (cx, cy + r * 0.22), (cx + r, cy), (cx, cy - r * 0.22)], fill=(255, 255, 255, 235))
+    d.ellipse([cx - r * 0.16, cy - r * 0.16, cx + r * 0.16, cy + r * 0.16], fill=(255, 255, 255, 255))
+
+
+def _draw_silk_sheen(img, x0: int, y0: int, x1: int, y1: int) -> None:
+    """Overlay a diagonal satin gloss + a few sparkle stars on a swatch so
+    'silk' filaments read as shiny on the print label."""
+    from PIL import Image, ImageDraw
+    w, h = int(x1 - x0), int(y1 - y0)
+    if w <= 0 or h <= 0:
+        return
+    ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    # Two translucent white parallelogram bands = an angled satin highlight.
+    d.polygon([(w * 0.34, 0), (w * 0.50, 0), (w * 0.24, h), (w * 0.08, h)], fill=(255, 255, 255, 60))
+    d.polygon([(w * 0.52, 0), (w * 0.58, 0), (w * 0.36, h), (w * 0.30, h)], fill=(255, 255, 255, 95))
+    # Sparkle stars at fixed scattered spots (off-centre to avoid the text).
+    r = max(3.0, w * 0.055)
+    for fx, fy in ((0.16, 0.24), (0.84, 0.30), (0.74, 0.76), (0.24, 0.78), (0.50, 0.14)):
+        _draw_sparkle(d, fx * w, fy * h, r)
+    img.paste(ov, (x0, y0), ov)
+
+
 def _render_label_png(
     size: tuple[int, int],
     customer_first: str,
@@ -540,6 +566,10 @@ def _render_label_png(
     else:
         draw.rectangle([(0, 0), (w, swatch_h)], fill=color_rgb)
         stroke_w, stroke_fill = 0, None
+    # Silk filaments get a satin gloss + sparkle so the label reads as shiny.
+    # Drawn before the text so the name stays on top and legible.
+    if "silk" in (color_name or "").lower():
+        _draw_silk_sheen(img, 0, 0, w, swatch_h)
     label_text = (color_name or "UNKNOWN").strip().upper()
     if w >= 256:
         draw.text((w / 2, swatch_h * 0.32), "LOAD", fill=on_swatch, font=font_small,

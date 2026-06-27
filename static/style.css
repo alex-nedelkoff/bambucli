@@ -916,3 +916,23 @@ table.uploads .inspecting-cell {
   color: #fff; background: var(--orange);
   padding: 1px 5px; border-radius: 8px;
 }
+
+/* ---------- Silk finish: glossy sheen on swatches ---------- */
+.fil-swatch-lg.silk::after,
+.stock-sw.silk::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(115deg,
+    rgba(255,255,255,0) 38%, rgba(255,255,255,0.60) 50%, rgba(255,255,255,0) 62%);
+}
+.stock-sw.silk { position: relative; overflow: hidden; }
+/* The large Filaments-tab swatch shimmers; the small dashboard chips keep a
+   static gloss so the always-on kiosk isn't full of motion. */
+.fil-swatch-lg.silk::after { animation: silk-shine 3.6s ease-in-out infinite; }
+@keyframes silk-shine {
+  0%   { transform: translateX(-40%); opacity: .45; }
+  50%  { transform: translateX(40%);  opacity: .9; }
+  100% { transform: translateX(-40%); opacity: .45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fil-swatch-lg.silk::after { animation: none; }
+}
