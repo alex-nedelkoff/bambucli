@@ -151,6 +151,13 @@ Then open <http://localhost:8000>. External tools must be installed separately:
 **WinUSB driver** for the receipt printer. Boot-time auto-start and the full
 setup are covered in **[docs/OPERATIONS.md](docs/OPERATIONS.md)**.
 
+> **Receipt printer driver:** the thermal printer ships bound to Windows'
+> `usbprint` driver, which `pyusb`/`python-escpos` can't open. You may need to
+> re-flash its driver to **WinUSB using [Zadig](https://zadig.akeo.ie/)** — the
+> WinUSB driver-installer, *not* Rufus (Rufus makes bootable USB drives). In
+> Zadig: pick the "USB Receipt Printer" device, choose **WinUSB**, and click
+> **Replace Driver**. Full steps in [docs/OPERATIONS.md §6](docs/OPERATIONS.md).
+
 ---
 
 ## Documentation
