@@ -234,13 +234,42 @@ COLOR_NAME_HEX = {
     "navy": "#0D1B3E", "teal": "#00796B", "cyan": "#00838F",
     "green": "#388E3C", "dark green": "#1B5E20", "light green": "#81C784",
     "forest green": "#1B5E20", "lime": "#AEEA00",
-    "yellow": "#FBC02D", "gold": "#F9A825",
+    "yellow": "#FBC02D",
     "orange": "#F57C00", "amber": "#FF8F00",
     "purple": "#7B1FA2", "violet": "#512DA8", "magenta": "#C2185B",
     "pink": "#D81B60", "hot pink": "#E91E63",
     "black": "#202020", "white": "#F5F5F5",
-    "grey": "#616161", "gray": "#616161", "silver": "#9E9E9E",
+    "grey": "#616161", "gray": "#616161",
     "brown": "#6D4C41", "tan": "#A1887F",
+    # Metallics — representative metallic tones (brighter/cooler than the
+    # plain yellow/grey so the swatch reads as metal, not paint).
+    "silver": "#C4C6CA", "gold": "#D4AF37", "copper": "#B87333", "bronze": "#A87B3F",
+    # Glow-in-the-dark: pale luminous green (the classic GITD pigment look).
+    "glow in the dark": "#BFF7C8", "glow": "#BFF7C8", "gitd": "#BFF7C8",
+}
+
+
+def _adjust_hex(hex_val: str, *, factor: float = 1.0,
+                toward: tuple[int, int, int] | None = None, blend: float = 0.0) -> str:
+    """Scale a colour's brightness by `factor`, then blend `blend` of the way
+    toward `toward`. Used to derive finish variants (dark/silk/light) of a base
+    swatch colour without enumerating every colour×finish combination."""
+    r, g, b = _hex_to_rgb(hex_val)
+    r, g, b = (min(255, max(0, int(c * factor))) for c in (r, g, b))
+    if toward is not None:
+        r, g, b = (int(c + (t - c) * blend) for c, t in zip((r, g, b), toward))
+    return "#%02X%02X%02X" % (r, g, b)
+
+
+# Finish modifiers staff type before a base colour ("silk gold", "dark green").
+# Each transforms the base colour's swatch: dark = deeper; light = washed
+# toward white; silk = brighter + a touch of pearlescent white sheen; matte =
+# slightly muted toward grey. Order matters — longer/compound prefixes first.
+_FINISH_MODS = {
+    "dark":  lambda hx: _adjust_hex(hx, factor=0.58),
+    "light": lambda hx: _adjust_hex(hx, toward=(255, 255, 255), blend=0.45),
+    "silk":  lambda hx: _adjust_hex(hx, factor=1.18, toward=(255, 255, 255), blend=0.22),
+    "matte": lambda hx: _adjust_hex(hx, factor=0.9, toward=(128, 128, 128), blend=0.18),
 }
 
 
@@ -248,8 +277,18 @@ def _name_to_hex(name: str) -> str:
     n = (name or "").strip().lower()
     if not n:
         return "#606060"
+    # Exact match wins, so hand-tuned entries (e.g. "dark red") beat the
+    # generic modifier transform below.
     if n in COLOR_NAME_HEX:
         return COLOR_NAME_HEX[n]
+    # Strip a leading finish modifier and transform the base colour's swatch.
+    # Recurses so compound finishes ("silk dark blue") and modifiers on
+    # multi-word bases ("dark forest green") still resolve.
+    for mod, transform in _FINISH_MODS.items():
+        if n.startswith(mod + " "):
+            base = _name_to_hex(n[len(mod) + 1:])
+            if base != "#606060":
+                return transform(base)
     for key, hex_val in COLOR_NAME_HEX.items():
         if key in n:
             return hex_val
