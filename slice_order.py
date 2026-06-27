@@ -229,9 +229,9 @@ def _hex_to_rgb(hex_str: str, fallback=(96, 96, 96)) -> tuple[int, int, int]:
 # Common filament colour names → representative hex. Used to paint the thumbnail
 # swatch in the colour the patron asked for (not the filament preset's default).
 COLOR_NAME_HEX = {
-    "red": "#D32F2F", "dark red": "#8E1515", "bright red": "#F44336",
+    "red": "#D32F2F", "dark red": "#8E1515", "bright red": "#F44336", "maroon": "#800000",
     "blue": "#1976D2", "dark blue": "#0D47A1", "light blue": "#64B5F6",
-    "navy": "#0D1B3E", "teal": "#00796B", "cyan": "#00838F",
+    "navy": "#0D1B3E", "teal": "#00796B", "cyan": "#00838F", "turquoise": "#1ABC9C",
     "green": "#388E3C", "dark green": "#1B5E20", "light green": "#81C784",
     "forest green": "#1B5E20", "lime": "#AEEA00",
     "yellow": "#FBC02D",
@@ -240,7 +240,7 @@ COLOR_NAME_HEX = {
     "pink": "#D81B60", "hot pink": "#E91E63",
     "black": "#202020", "white": "#F5F5F5",
     "grey": "#616161", "gray": "#616161",
-    "brown": "#6D4C41", "tan": "#A1887F",
+    "brown": "#6D4C41", "tan": "#A1887F", "beige": "#E4D5B7",
     # Metallics — representative metallic tones (brighter/cooler than the
     # plain yellow/grey so the swatch reads as metal, not paint).
     "silver": "#C4C6CA", "gold": "#D4AF37", "copper": "#B87333", "bronze": "#A87B3F",
