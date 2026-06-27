@@ -917,14 +917,14 @@ table.uploads .inspecting-cell {
 }
 .stock-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .stock-chip {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 5px 10px 5px 6px;
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 6px 14px 6px 7px;
   background: var(--bg); border: 1px solid var(--border);
-  border-radius: 16px; font-size: 13px;
+  border-radius: 22px; font-size: 14px;
 }
 .stock-chip.low { border-color: var(--orange); }
 .stock-sw {
-  width: 18px; height: 18px; border-radius: 50%;
+  width: 34px; height: 34px; border-radius: 50%;
   border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0;
 }
 .stock-name { color: var(--text); }
