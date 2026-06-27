@@ -369,6 +369,9 @@ def _hex_to_name(hex_str: str) -> str:
 # manages the list via routes in printer_dashboard.py. Mirrors the sd_cards.json
 # load/save pattern (atomic temp-file + rename).
 FILAMENTS_JSON = BASE_DIR / "filaments.json"
+# Auto-backup mirror: every save writes here too; _load_filaments recovers from
+# it if the live file is ever wiped/corrupted, so staff edits survive a reset.
+FILAMENTS_BAK = BASE_DIR / "filaments.bak.json"
 _filaments_lock = threading.Lock()
 # Alias keys in COLOR_NAME_HEX that duplicate another entry — skipped when
 # seeding so the inventory isn't cluttered with synonyms.
@@ -404,20 +407,19 @@ def _normalize_filament(raw: dict) -> "dict | None":
             "low": bool(raw.get("low", False))}
 
 
-def _load_filaments() -> list[dict]:
-    """Curated inventory from filaments.json; seeds + writes the file from
-    COLOR_NAME_HEX on first use."""
-    if not FILAMENTS_JSON.exists():
-        seeded = _seed_filaments()
-        _save_filaments(seeded)
-        return seeded
+def _read_filaments_file(path: "Path") -> "list[dict] | None":
+    """Parse one inventory file into normalised items, or None if it's
+    missing/corrupt. An empty list is a valid 'staff cleared everything' state
+    (returned as []), distinct from None."""
+    if not path.exists():
+        return None
     try:
-        data = json.loads(FILAMENTS_JSON.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return _seed_filaments()
+        return None
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
-        return _seed_filaments()
+        return None
     out = []
     for raw in items:
         if isinstance(raw, dict):
@@ -427,14 +429,38 @@ def _load_filaments() -> list[dict]:
     return out
 
 
+def _load_filaments() -> list[dict]:
+    """Curated inventory. Reads filaments.json; if it's missing or corrupt, the
+    settings are recovered from the auto-backup (filaments.bak.json) before
+    falling back to a fresh seed — so an accidental wipe never loses staff edits."""
+    items = _read_filaments_file(FILAMENTS_JSON)
+    if items is not None:
+        return items
+    backup = _read_filaments_file(FILAMENTS_BAK)
+    if backup is not None:
+        _save_filaments(backup)   # restore the live file from the backup
+        return backup
+    seeded = _seed_filaments()
+    _save_filaments(seeded)
+    return seeded
+
+
 def _save_filaments(items: list[dict]) -> None:
-    """Atomic write of the inventory; invalidates the override cache."""
+    """Atomic write of the inventory + a mirror to the backup file; invalidates
+    the override cache."""
     global _overrides_cache
     with _filaments_lock:
-        tmp = FILAMENTS_JSON.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"version": 1, "items": items}, indent=2),
-                       encoding="utf-8")
-        tmp.replace(FILAMENTS_JSON)
+        payload = json.dumps({"version": 1, "items": items}, indent=2)
+        for target in (FILAMENTS_JSON, FILAMENTS_BAK):
+            try:
+                tmp = target.with_name(target.name + ".tmp")
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(target)
+            except OSError:
+                # The live file is the one that matters; a failed backup write
+                # shouldn't break a save.
+                if target is FILAMENTS_JSON:
+                    raise
         _overrides_cache = None
 
 
@@ -464,16 +490,19 @@ def _filament_overrides() -> dict[str, str]:
     global _overrides_cache
     if _overrides_cache is None:
         ov: dict[str, str] = {}
-        if FILAMENTS_JSON.exists():
+        for path in (FILAMENTS_JSON, FILAMENTS_BAK):  # backup if live file is gone
+            if not path.exists():
+                continue
             try:
-                data = json.loads(FILAMENTS_JSON.read_text(encoding="utf-8"))
-                for raw in (data.get("items") or []):
-                    name = str(raw.get("name", "")).strip().lower()
-                    hx = str(raw.get("hex", "")).strip()
-                    if name and _HEX_RE.match(hx):
-                        ov[name] = hx.upper()
+                data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                pass
+                continue
+            for raw in (data.get("items") or []):
+                name = str(raw.get("name", "")).strip().lower()
+                hx = str(raw.get("hex", "")).strip()
+                if name and _HEX_RE.match(hx):
+                    ov[name] = hx.upper()
+            break
         _overrides_cache = ov
     return _overrides_cache
 

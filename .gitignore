@@ -12,8 +12,9 @@ printers.json
 sd_cards.json
 
 # Staff-curated filament colour inventory (on-hand flags + custom swatch hexes).
-# Per-instance data, not source.
+# Per-instance data, not source. .bak.json is the auto-backup mirror.
 filaments.json
+filaments.bak.json
 
 # Live camera snapshots (overwritten on the printer_dashboard snapshot loop).
 snapshots/
