@@ -357,6 +357,24 @@ def _fit_font(draw, text: str, max_w: int, start_px: int, min_px: int = 10):
     return _load_font(max(min_px, int(start_px * max_w / width)))
 
 
+# Multi-colour filament names that can't be one hex — rendered as a hue sweep.
+_GRADIENT_NAMES = ("rainbow", "gradient")
+
+
+def _draw_hue_gradient(img, x0: int, y0: int, x1: int, y1: int) -> None:
+    """Paint a horizontal rainbow (left-to-right hue sweep) into the rectangle.
+    Used as the swatch for multi-colour filaments like 'rainbow', which no
+    single hex can represent."""
+    import colorsys
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    span = max(1, x1 - x0)
+    for i in range(span):
+        r, g, b = colorsys.hsv_to_rgb(i / span, 0.85, 1.0)
+        d.line([(x0 + i, y0), (x0 + i, y1)],
+               fill=(int(r * 255), int(g * 255), int(b * 255)))
+
+
 def _render_label_png(
     size: tuple[int, int],
     customer_first: str,
@@ -396,14 +414,21 @@ def _render_label_png(
 
     # Top colour swatch (≈45% of height) with "LOAD:" label + colour name
     swatch_h = int(h * 0.45)
-    draw.rectangle([(0, 0), (w, swatch_h)], fill=color_rgb)
+    # Rainbow / gradient filaments get a hue sweep instead of a solid swatch;
+    # text gets a dark outline so it stays legible over the bright spectrum.
+    if any(g in (color_name or "").lower() for g in _GRADIENT_NAMES):
+        _draw_hue_gradient(img, 0, 0, w, swatch_h)
+        on_swatch, stroke_w, stroke_fill = (255, 255, 255), max(2, int(3 * scale)), (0, 0, 0)
+    else:
+        draw.rectangle([(0, 0), (w, swatch_h)], fill=color_rgb)
+        stroke_w, stroke_fill = 0, None
     label_text = (color_name or "UNKNOWN").strip().upper()
     if w >= 256:
-        draw.text((w / 2, swatch_h * 0.32), "LOAD", fill=on_swatch,
-                  font=font_small, anchor="mm")
+        draw.text((w / 2, swatch_h * 0.32), "LOAD", fill=on_swatch, font=font_small,
+                  anchor="mm", stroke_width=stroke_w, stroke_fill=stroke_fill)
     name_font = _fit_font(draw, label_text, int(w * 0.90), max(12, int(64 * scale)))
-    draw.text((w / 2, swatch_h * 0.62), label_text, fill=on_swatch,
-              font=name_font, anchor="mm")
+    draw.text((w / 2, swatch_h * 0.62), label_text, fill=on_swatch, font=name_font,
+              anchor="mm", stroke_width=stroke_w, stroke_fill=stroke_fill)
 
     if w < 256:
         # Compact label (small thumbnail): just patron name under the swatch.
