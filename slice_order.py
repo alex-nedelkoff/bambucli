@@ -303,6 +303,36 @@ def _name_to_hex(name: str) -> str:
     return "#606060"
 
 
+# Separators staff use to type a multi-colour filament: "red/blue", "red & blue",
+# "white + red", "red and blue". Comma is intentionally excluded — it separates
+# per-plate colours elsewhere in the pipeline.
+_MULTI_SEP_RE = re.compile(r"\s*(?:/|&|\+|\band\b)\s*", re.I)
+
+
+def _colour_components(name: str) -> list[str]:
+    """Split a colour string on multi-colour separators and resolve each part to
+    a hex. Returns 1-3 hexes (capped at three); a single colour gives one."""
+    s = (name or "").strip()
+    if not s:
+        return ["#606060"]
+    parts = [p for p in _MULTI_SEP_RE.split(s) if p.strip()]
+    if len(parts) <= 1:
+        return [_name_to_hex(s)]
+    return [_name_to_hex(p) for p in parts[:3]]
+
+
+def _swatch_css(hexes: list[str]) -> str:
+    """CSS background for a swatch: a solid colour for one, or a hard-stop
+    linear-gradient (clean colour bands) for a multi-colour filament."""
+    if not hexes:
+        return "#606060"
+    if len(hexes) == 1:
+        return hexes[0]
+    n = len(hexes)
+    stops = [f"{hx} {i * 100 // n}% {(i + 1) * 100 // n}%" for i, hx in enumerate(hexes)]
+    return "linear-gradient(135deg, " + ", ".join(stops) + ")"
+
+
 def _hex_to_name(hex_str: str) -> str:
     """Reverse of _name_to_hex for displaying a slicer-embedded filament hex
     as a human colour. Picks the closest entry in COLOR_NAME_HEX by RGB
@@ -405,8 +435,14 @@ def filament_inventory_list() -> list[dict]:
     out = []
     for it in _load_filaments():
         default = COLOR_NAME_HEX.get(it["name"].lower())
-        out.append({**it, "default_hex": (default or it["hex"]).upper(),
-                    "is_default": default is not None})
+        comps = _colour_components(it["name"])
+        out.append({**it,
+                    "default_hex": (default or it["hex"]).upper(),
+                    "is_default": default is not None,
+                    "multi": len(comps) > 1,
+                    # Solid for one colour (honours the override hex); a gradient
+                    # of bands for a multi-colour filament.
+                    "swatch_css": _swatch_css(comps) if len(comps) > 1 else it["hex"]})
     return out
 
 
@@ -519,6 +555,19 @@ def _draw_silk_sheen(img, x0: int, y0: int, x1: int, y1: int) -> None:
     img.paste(ov, (x0, y0), ov)
 
 
+def _draw_multicolor(img, x0: int, y0: int, x1: int, y1: int, hexes: list[str]) -> None:
+    """Fill a swatch with 2-3 equal vertical colour bands for a multi-colour
+    filament (e.g. 'Red / Blue')."""
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    n = max(1, len(hexes))
+    span = x1 - x0
+    for i, hx in enumerate(hexes):
+        xa = x0 + span * i // n
+        xb = x0 + span * (i + 1) // n
+        d.rectangle([(xa, y0), (xb, y1)], fill=_hex_to_rgb(hx))
+
+
 def _render_label_png(
     size: tuple[int, int],
     customer_first: str,
@@ -560,8 +609,13 @@ def _render_label_png(
     swatch_h = int(h * 0.45)
     # Rainbow / gradient filaments get a hue sweep instead of a solid swatch;
     # text gets a dark outline so it stays legible over the bright spectrum.
+    comps = _colour_components(color_name)
     if any(g in (color_name or "").lower() for g in _GRADIENT_NAMES):
         _draw_hue_gradient(img, 0, 0, w, swatch_h)
+        on_swatch, stroke_w, stroke_fill = (255, 255, 255), max(2, int(3 * scale)), (0, 0, 0)
+    elif len(comps) > 1:
+        # Multi-colour filament ("Red / Blue"): equal colour bands, outlined text.
+        _draw_multicolor(img, 0, 0, w, swatch_h, comps)
         on_swatch, stroke_w, stroke_fill = (255, 255, 255), max(2, int(3 * scale)), (0, 0, 0)
     else:
         draw.rectangle([(0, 0), (w, swatch_h)], fill=color_rgb)

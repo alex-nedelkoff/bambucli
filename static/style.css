@@ -874,6 +874,8 @@ table.uploads .inspecting-cell {
 .fil-status.status-low { border-color: var(--orange); color: #b85c00; background: #fff7ef; }
 .fil-status.status-out { color: var(--muted); }
 .fil-status-msg { font-size: 12px; min-height: 14px; }
+.fil-multi-note { font-size: 11px; color: var(--muted); font-style: italic; padding: 3px 2px; }
+.fil-multi .fil-swatch-lg { cursor: default; }
 .fil-add-card { border-style: dashed; justify-content: flex-start; }
 .fil-add-name {
   font-size: 13px; padding: 5px 6px;

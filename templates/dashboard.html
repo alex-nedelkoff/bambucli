@@ -441,7 +441,7 @@
       `<div class="stock-head">Filament in stock <span class="stock-count">${onHand.length}</span></div>` +
       '<div class="stock-chips">' +
       onHand.map(i => `<span class="stock-chip${i.low ? ' low' : ''}">` +
-        `<span class="stock-sw${/silk/i.test(i.name) ? ' silk' : ''}" style="background:${escText(i.hex)}"></span>` +
+        `<span class="stock-sw${/silk/i.test(i.name) ? ' silk' : ''}" style="background:${i.swatch_css || i.hex}"></span>` +
         `<span class="stock-name">${escText(i.name)}</span>` +
         (i.low ? '<span class="stock-low">LOW</span>' : '') +
         '</span>').join('') +

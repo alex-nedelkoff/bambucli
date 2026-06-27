@@ -11,18 +11,23 @@
   <div class="filaments-grid">
     {% for it in items %}
     {% set status = 'low' if (it.on_hand and it.low) else ('in' if it.on_hand else 'out') %}
-    <div class="fil-card" data-name="{{ it.name }}" data-default="{{ it.default_hex }}">
+    <div class="fil-card{% if it.multi %} fil-multi{% endif %}" data-name="{{ it.name }}"
+         data-default="{{ it.default_hex }}" data-hex="{{ it.hex }}">
       <button type="button" class="fil-delete" title="Remove from list">✕</button>
-      <label class="fil-swatch-lg{% if 'silk' in it.name|lower %} silk{% endif %}" style="background: {{ it.hex }};">
-        <input type="color" class="fil-color" value="{{ it.hex }}">
+      <label class="fil-swatch-lg{% if 'silk' in it.name|lower %} silk{% endif %}" style="background: {{ it.swatch_css }};">
+        {% if not it.multi %}<input type="color" class="fil-color" value="{{ it.hex }}">{% endif %}
       </label>
       <input type="text" class="fil-name" value="{{ it.name }}" maxlength="40" spellcheck="false"
              title="Click to rename">
+      {% if it.multi %}
+      <div class="fil-multi-note">multi-colour</div>
+      {% else %}
       <div class="fil-hexrow">
         <input type="text" class="fil-hex" value="{{ it.hex }}" maxlength="7" spellcheck="false">
         <button type="button" class="fil-reset" title="Reset to default {{ it.default_hex }}"
                 {% if it.hex|upper == it.default_hex|upper %}style="visibility:hidden;"{% endif %}>↺</button>
       </div>
+      {% endif %}
       <select class="fil-status status-{{ status }}">
         <option value="out"{% if status == 'out' %} selected{% endif %}>Out of stock</option>
         <option value="in"{% if status == 'in' %} selected{% endif %}>In stock</option>
@@ -72,8 +77,10 @@
 
   function vals(card) {
     const [onHand, low] = STATUS[card.querySelector('.fil-status').value] || [false, false];
+    const hexEl = card.querySelector('.fil-hex');
     return {
-      name: card.dataset.name, hex: norm(card.querySelector('.fil-hex').value),
+      name: card.dataset.name,
+      hex: hexEl ? norm(hexEl.value) : (card.dataset.hex || '#606060'),
       onHand, low, msg: card.querySelector('.fil-status-msg'),
     };
   }
@@ -82,20 +89,24 @@
     const color = card.querySelector('.fil-color'), hex = card.querySelector('.fil-hex'),
           sw = card.querySelector('.fil-swatch-lg'), reset = card.querySelector('.fil-reset'),
           sel = card.querySelector('.fil-status'), nameEl = card.querySelector('.fil-name');
-    const preview = () => { const h = norm(hex.value); if (HEX.test(h)) sw.style.background = h; };
-    const saveHex = () => { const v = vals(card); if (HEX.test(v.hex)) upsert(v.name, v.hex, v.onHand, v.low, v.msg); };
-    color.addEventListener('input', () => { hex.value = color.value; preview(); reset.style.visibility = ''; });
-    color.addEventListener('change', saveHex);
-    hex.addEventListener('input', () => { const h = norm(hex.value); if (HEX.test(h)) color.value = h; preview(); reset.style.visibility = ''; });
-    hex.addEventListener('change', saveHex);
+    // Single-colour cards have a picker + hex field; multi-colour cards don't
+    // (their swatch comes from the name), so guard those handlers.
+    if (color && hex && reset) {
+      const preview = () => { const h = norm(hex.value); if (HEX.test(h)) sw.style.background = h; };
+      const saveHex = () => { const v = vals(card); if (HEX.test(v.hex)) upsert(v.name, v.hex, v.onHand, v.low, v.msg); };
+      color.addEventListener('input', () => { hex.value = color.value; preview(); reset.style.visibility = ''; });
+      color.addEventListener('change', saveHex);
+      hex.addEventListener('input', () => { const h = norm(hex.value); if (HEX.test(h)) color.value = h; preview(); reset.style.visibility = ''; });
+      hex.addEventListener('change', saveHex);
+      reset.addEventListener('click', () => {
+        const d = card.dataset.default;
+        hex.value = d; color.value = d; preview(); reset.style.visibility = 'hidden';
+        const v = vals(card); upsert(v.name, d, v.onHand, v.low, v.msg);
+      });
+    }
     sel.addEventListener('change', () => {
       sel.className = 'fil-status status-' + sel.value;
       const v = vals(card); upsert(v.name, v.hex, v.onHand, v.low, v.msg);
-    });
-    reset.addEventListener('click', () => {
-      const d = card.dataset.default;
-      hex.value = d; color.value = d; preview(); reset.style.visibility = 'hidden';
-      const v = vals(card); upsert(v.name, d, v.onHand, v.low, v.msg);
     });
     // Rename: re-key the entry (old_name dropped, new name added) in one call.
     nameEl.addEventListener('keydown', e => { if (e.key === 'Enter') nameEl.blur(); });
