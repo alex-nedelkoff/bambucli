@@ -28,6 +28,7 @@
   </div>
 
   {% if jobs %}
+  <div class="table-scroll">
   <table class="history-table">
     <thead>
       <tr>
@@ -100,6 +101,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <p id="jobs-empty" class="empty-msg" style="display:none;">No jobs match this filter.</p>
   {% else %}
   <p class="empty-msg">No jobs observed yet — the dashboard logs every print as it sees it on MQTT.</p>

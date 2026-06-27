@@ -475,10 +475,13 @@ table.uploads .inspecting-cell {
   white-space: nowrap;
 }
 .history-table td {
-  padding: 10px;
+  padding: 8px 7px;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
+/* Keep wide tables (e.g. the Jobs Log) inside the card — scroll instead of
+   overflowing the page when there are more columns than the viewport fits. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .history-table .ts-cell { color: var(--muted); white-space: nowrap; }
 .history-table .ts-cell small { color: var(--muted); font-size: 11px; }
 .history-table .card-num { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
