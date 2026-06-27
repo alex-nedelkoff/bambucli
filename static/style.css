@@ -876,6 +876,21 @@ table.uploads .inspecting-cell {
 .fil-status-msg { font-size: 12px; min-height: 14px; }
 .fil-multi-note { font-size: 11px; color: var(--muted); font-style: italic; padding: 3px 2px; }
 .fil-multi .fil-swatch-lg { cursor: default; }
+
+/* Naming-convention help box (Filaments tab) + inline hint (print page) */
+.naming-note {
+  margin: 4px 0 16px; padding: 10px 14px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; color: var(--text);
+}
+.naming-note > strong { color: var(--navy); }
+.naming-note ul { margin: 6px 0 0; padding-left: 20px; }
+.naming-note li { margin: 3px 0; }
+.naming-note code, .color-naming-hint code {
+  background: var(--card-bg); border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 4px; font-size: 12px;
+}
+.color-naming-hint { display: block; margin-top: 6px; }
 .fil-add-card { border-style: dashed; justify-content: flex-start; }
 .fil-add-name {
   font-size: 13px; padding: 5px 6px;

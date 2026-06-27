@@ -322,15 +322,13 @@ def _colour_components(name: str) -> list[str]:
 
 
 def _swatch_css(hexes: list[str]) -> str:
-    """CSS background for a swatch: a solid colour for one, or a hard-stop
-    linear-gradient (clean colour bands) for a multi-colour filament."""
+    """CSS background for a swatch: a solid colour for one, or a soft diagonal
+    blend between the colours for a multi-colour filament."""
     if not hexes:
         return "#606060"
     if len(hexes) == 1:
         return hexes[0]
-    n = len(hexes)
-    stops = [f"{hx} {i * 100 // n}% {(i + 1) * 100 // n}%" for i, hx in enumerate(hexes)]
-    return "linear-gradient(135deg, " + ", ".join(stops) + ")"
+    return "linear-gradient(135deg, " + ", ".join(hexes) + ")"
 
 
 def _hex_to_name(hex_str: str) -> str:
@@ -555,17 +553,33 @@ def _draw_silk_sheen(img, x0: int, y0: int, x1: int, y1: int) -> None:
     img.paste(ov, (x0, y0), ov)
 
 
+def _interp_colour(rgbs, t: float):
+    """Linear-interpolate a colour at position t in [0,1] across the stops."""
+    n = len(rgbs)
+    if n == 1:
+        return rgbs[0]
+    t = max(0.0, min(1.0, t))
+    pos = t * (n - 1)
+    i = min(int(pos), n - 2)
+    f = pos - i
+    a, b = rgbs[i], rgbs[i + 1]
+    return tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+
+
 def _draw_multicolor(img, x0: int, y0: int, x1: int, y1: int, hexes: list[str]) -> None:
-    """Fill a swatch with 2-3 equal vertical colour bands for a multi-colour
-    filament (e.g. 'Red / Blue')."""
+    """Fill a swatch with a soft diagonal (135deg) blend between 2-3 colours,
+    matching the web swatch gradient. Drawn as constant-sum anti-diagonal lines
+    coloured by their position along the diagonal."""
     from PIL import ImageDraw
     d = ImageDraw.Draw(img)
-    n = max(1, len(hexes))
-    span = x1 - x0
-    for i, hx in enumerate(hexes):
-        xa = x0 + span * i // n
-        xb = x0 + span * (i + 1) // n
-        d.rectangle([(xa, y0), (xb, y1)], fill=_hex_to_rgb(hx))
+    rgbs = [_hex_to_rgb(h) for h in hexes]
+    w, h = int(x1 - x0), int(y1 - y0)
+    total = max(1, w + h)
+    for s in range(total + 1):
+        col = _interp_colour(rgbs, s / total)
+        xa = min(w, s); ya = s - xa
+        xb = max(0, s - h); yb = s - xb
+        d.line([(x0 + xa, y0 + ya), (x0 + xb, y0 + yb)], fill=col, width=2)
 
 
 def _render_label_png(

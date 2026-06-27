@@ -8,6 +8,21 @@
     stock status from the dropdown — changes save automatically. Add your own with the
     <em>+ Add</em> tile. Names match what staff type in the colour field on a new order.</p>
 
+  <div class="naming-note">
+    <strong>Naming convention</strong>
+    <ul>
+      <li><strong>Basic:</strong> a colour name — <code>Blue</code>, <code>Black</code>, <code>Teal</code>.</li>
+      <li><strong>Finishes:</strong> prefix with <code>silk</code>, <code>dark</code>, <code>light</code>,
+        or <code>matte</code> — e.g. <code>Silk Gold</code>, <code>Dark Teal</code>. (Silk names also
+        get a shiny swatch + sparkly label.)</li>
+      <li><strong>Specials:</strong> metallics <code>Silver</code>/<code>Gold</code>/<code>Copper</code>,
+        <code>Glow in the Dark</code>, <code>Rainbow</code>.</li>
+      <li><strong>Multi-colour (2–3):</strong> combine names with <code>/</code>, <code>&amp;</code>,
+        <code>+</code>, or <code>and</code> — e.g. <code>Red / Blue</code>,
+        <code>White + Red + Black</code>. The swatch blends the colours.</li>
+    </ul>
+  </div>
+
   <div class="filaments-grid">
     {% for it in items %}
     {% set status = 'low' if (it.on_hand and it.low) else ('in' if it.on_hand else 'out') %}
