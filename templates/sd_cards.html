@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}SD Cards · Makerspace Print Intake{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>SD Cards</h2>
+  <p class="hint">Every physical microSD card carries a hidden marker file
+    so the dashboard can identify which card is in which printer. Set a
+    friendly name (e.g. <code>R1</code>, <code>B1</code>) below — that
+    name auto-fills the &ldquo;card&rdquo; field on patron receipts when
+    you save a file to that printer.</p>
+
+  <div class="card-inset" style="margin: 12px 0 18px; padding: 10px 14px;
+       background: var(--bg-subtle, #fafafa); border-radius: 6px;">
+    <strong>Backfill job history</strong>
+    <div class="hint" style="margin: 4px 0 8px;">
+      One-shot: lists every online printer's SD card and fills in the
+      <em>Card</em> column on <a href="/jobs">/jobs</a> for past prints
+      where the source 3MF is still on a card. Rows where the file
+      moved between cards or was deleted stay blank.
+    </div>
+    <button type="button" id="backfill-btn" class="button-mini">Run backfill</button>
+    <span id="backfill-status" style="margin-left: 10px; font-size: 12px;"></span>
+  </div>
+
+  {% if not cards %}
+    <p class="hint"><em>No cards probed yet. Wait ~15 seconds after a
+      dashboard restart, or trigger a save-to-SD on any printer, then
+      refresh this page.</em></p>
+  {% else %}
+  <table class="plates">
+    <thead>
+      <tr>
+        <th>Card name</th>
+        <th>Currently in</th>
+        <th>UUID</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cards %}
+      <tr data-uuid="{{ c.uuid }}">
+        <td>
+          <input type="text" class="card-name-input" value="{{ c.name }}"
+                 maxlength="80" style="width: 12em;">
+        </td>
+        <td>
+          {% if c.currently_in %}
+            {{ c.currently_in.printer_label }}
+            <button type="button" class="button-mini view-files-btn"
+                    data-printer-id="{{ c.currently_in.printer_id }}"
+                    style="margin-left: 6px;">View files</button>
+          {% else %}
+            <span class="muted">— not in any online printer</span>
+          {% endif %}
+        </td>
+        <td><code style="font-size: 11px; color: var(--muted);">{{ c.uuid[:12] }}…</code></td>
+        <td>
+          <button type="button" class="button-mini rename-btn">Save</button>
+          <span class="rename-status" style="margin-left: 8px; font-size: 12px;"></span>
+        </td>
+      </tr>
+      <tr class="files-row" data-files-for="{{ c.uuid }}" style="display: none;">
+        <td colspan="4" class="files-cell" style="background: var(--bg-subtle, #fafafa); padding: 10px 14px;">
+          <div class="files-status"><em>loading…</em></div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  function fmtSize(b) {
+    if (b == null) return '';
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+  function fmtMtime(epoch) {
+    if (!epoch) return 'unknown date';
+    const d = new Date(epoch * 1000);
+    const ageSec = (Date.now() / 1000) - epoch;
+    if (ageSec < 60) return 'just now';
+    if (ageSec < 3600) return Math.floor(ageSec / 60) + ' min ago';
+    if (ageSec < 86400) return Math.floor(ageSec / 3600) + ' h ago';
+    if (ageSec < 7 * 86400) return Math.floor(ageSec / 86400) + ' d ago';
+    return d.toISOString().slice(0, 16).replace('T', ' ');
+  }
+  function escapeText(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  document.querySelectorAll('.view-files-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('tr');
+      const uuid = row.dataset.uuid;
+      const printerId = btn.dataset.printerId;
+      const filesRow = document.querySelector(`tr.files-row[data-files-for="${uuid}"]`);
+      const cell = filesRow.querySelector('.files-cell');
+      const status = filesRow.querySelector('.files-status');
+
+      // Toggle off if already open (re-click closes).
+      if (filesRow.style.display !== 'none') {
+        filesRow.style.display = 'none';
+        btn.textContent = 'View files';
+        return;
+      }
+      filesRow.style.display = '';
+      btn.textContent = 'Hide files';
+      btn.disabled = true;
+      status.innerHTML = '<em>loading…</em>';
+
+      try {
+        const res = await fetch(`/api/printers/${printerId}/sd-files`);
+        if (!res.ok) {
+          const text = (await res.text()).slice(0, 300);
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        const body = await res.json();
+        if (!body.files.length) {
+          cell.innerHTML = '<em>No .3mf files on this card.</em>';
+          return;
+        }
+        const rows = body.files.map(f => `
+          <li style="margin: 4px 0;">
+            <code>${escapeText(f.name)}</code>
+            <span class="muted" style="font-size: 12px; margin-left: 8px;">
+              ${fmtSize(f.size)} · ${fmtMtime(f.mtime_epoch)}
+            </span>
+          </li>`).join('');
+        cell.innerHTML = `
+          <div style="font-size: 13px;">
+            <div style="margin-bottom: 6px; color: var(--muted);">
+              ${body.files.length} .3mf file${body.files.length === 1 ? '' : 's'}
+              on <strong>${escapeText(body.printer_label)}</strong>'s SD card
+            </div>
+            <ul style="margin: 0; padding-left: 20px;">${rows}</ul>
+          </div>`;
+      } catch (e) {
+        cell.innerHTML = `<em class="error-msg">failed: ${escapeText(e.message)}</em>`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  const backfillBtn = document.getElementById('backfill-btn');
+  if (backfillBtn) {
+    backfillBtn.addEventListener('click', async () => {
+      const status = document.getElementById('backfill-status');
+      backfillBtn.disabled = true;
+      status.textContent = 'listing all printers (this can take 30s)…';
+      status.className = '';
+      try {
+        const res = await fetch('/api/sd-cards/backfill-jobs', { method: 'POST' });
+        if (!res.ok) {
+          const text = (await res.text()).slice(0, 300);
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        const body = await res.json();
+        const c = body.counts;
+        const parts = [
+          `examined ${c.total_examined}`,
+          `matched ${c.matched_same_printer} (same printer)`,
+          `matched ${c.matched_unique_global} (cross-printer)`,
+          `ambiguous ${c.ambiguous_skipped}`,
+          `no match ${c.no_match}`,
+        ];
+        let line = parts.join(', ');
+        const errs = (body.per_printer || []).filter(p => p.error);
+        if (errs.length) {
+          line += ' · errors: ' + errs.map(e => `${e.printer_id}: ${e.error}`).join('; ');
+        }
+        status.textContent = line;
+        status.className = 'success-msg';
+      } catch (e) {
+        status.textContent = 'failed: ' + e.message;
+        status.className = 'error-msg';
+      } finally {
+        backfillBtn.disabled = false;
+      }
+    });
+  }
+
+  document.querySelectorAll('.rename-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('tr');
+      const uuid = row.dataset.uuid;
+      const input = row.querySelector('.card-name-input');
+      const status = row.querySelector('.rename-status');
+      const name = input.value.trim();
+      btn.disabled = true;
+      status.textContent = '…';
+      status.className = 'rename-status';
+      const fd = new FormData();
+      fd.append('name', name);
+      try {
+        const res = await fetch(`/api/sd-cards/${uuid}/rename`, { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        const body = await res.json();
+        input.value = body.name;
+        status.textContent = '✓ saved';
+        status.className = 'rename-status success-msg';
+      } catch (e) {
+        status.textContent = 'failed: ' + e.message;
+        status.className = 'rename-status error-msg';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

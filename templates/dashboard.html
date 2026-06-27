@@ -1,0 +1,460 @@
+{% extends "base.html" %}
+{% block title %}Printer Dashboard{% endblock %}
+{% block content %}
+<style>
+  /* Sized for a 1920x1080 / 2560x1440 kiosk screen with up to ~3 tiles
+     across. Each track is bounded — without an upper bound a lone tile
+     would expand to fill the viewport and the camera frame becomes
+     enormous. justify-content: center keeps a single tile from clinging
+     to the left edge. */
+  main.container { max-width: none; padding: 16px 20px 28px; }
+
+  .dash-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 640px));
+    gap: 16px;
+    justify-content: center;
+  }
+
+  .printer-tile {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;  /* lets ellipsis work inside the grid track */
+  }
+
+  .pt-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .pt-title { margin: 0; font-size: 18px; font-weight: 700; }
+  .pt-model { color: var(--muted); font-size: 12px; margin-top: 1px; }
+  /* Small chip showing which physical SD card is currently in this
+     printer — driven by the FTPS marker probe. Click-through to the
+     admin page for renaming. UUID stays in title= as a fallback. */
+  .pt-sdcard { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pt-sdcard a { color: inherit; text-decoration: none;
+                 border-bottom: 1px dotted var(--muted); }
+  .pt-sdcard a:hover { color: var(--text); }
+  .pt-sdcard.empty { font-style: italic; opacity: 0.7; }
+
+  .badge {
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: #E5E7EB;
+    color: #374151;
+    white-space: nowrap;
+  }
+  .badge.running  { background: #DCFCE7; color: #166534; }
+  .badge.finish   { background: #DBEAFE; color: #1E40AF; }
+  .badge.pause    { background: #FEF3C7; color: #92400E; }
+  .badge.failed   { background: #FEE2E2; color: #991B1B; }
+  .badge.idle     { background: #F3F4F6; color: #4B5563; }
+  .badge.offline  { background: #FEE2E2; color: #991B1B; }
+
+  .file-row {
+    font-size: 13px;
+    color: var(--muted);
+    min-height: 18px;
+    /* ellipsize long filenames so they can't push the cam preview out
+       of place. The full name is in the title attribute on hover. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-row strong { color: var(--text); font-weight: 600; }
+
+  .pct-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .pct-row .pct { font-size: 24px; font-weight: 700; color: var(--text); }
+  .pct-row .eta { font-size: 14px; font-weight: 600; color: var(--text); }
+
+  .progress {
+    height: 8px;
+    background: #E5E7EB;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .progress > .bar {
+    height: 100%;
+    background: var(--orange);
+    width: 0;
+    transition: width 0.4s ease;
+  }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    font-size: 12px;
+  }
+  .stat { background: #F9FAFB; padding: 7px 8px; border-radius: 5px; }
+  .stat .lbl { color: var(--muted); text-transform: uppercase; font-size: 9px; letter-spacing: 0.06em; }
+  .stat .val { font-size: 15px; font-weight: 600; margin-top: 1px; }
+  .stat .sub { color: var(--muted); font-size: 10px; }
+
+  /* Camera frame sits inside the tile and is naturally bounded by the
+     tile's max width (640px). On a 1920px kiosk that's a ~360px-tall
+     preview when the grid wraps to 3 tiles, ~280-320px when 3-up. Cap
+     max-height defensively so a lone tile doesn't blow up. */
+  .cam-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    max-height: 360px;
+    background: #111;
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .cam-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cam-wrap .cam-empty { color: #888; font-size: 11px; padding: 0 12px; text-align: center; }
+  .cam-wrap .cam-stamp {
+    position: absolute;
+    bottom: 4px; right: 6px;
+    background: rgba(0,0,0,0.55);
+    color: #eee;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+  }
+
+  .ams-row { display: flex; flex-direction: column; gap: 6px; }
+  .ams-unit {
+    display: grid;
+    grid-template-columns: 56px repeat(4, 1fr);
+    gap: 5px;
+    align-items: center;
+  }
+  .ams-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .slot {
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 6px;
+    font-size: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 38px;
+    background: #fff;
+  }
+  .slot.empty { opacity: 0.4; }
+  .slot .swatch {
+    width: 100%;
+    height: 11px;
+    border-radius: 3px;
+    border: 1px solid rgba(0,0,0,0.1);
+  }
+  .slot .meta {
+    display: flex;
+    justify-content: space-between;
+    color: var(--muted);
+  }
+  .slot .meta .type { font-weight: 600; color: var(--text); }
+
+  .conn-line {
+    font-size: 10px;
+    color: var(--muted);
+    text-align: right;
+  }
+  .conn-line.err { color: #991B1B; }
+</style>
+
+<div class="dash-grid" id="dash-grid"></div>
+
+<div id="filament-stock" class="stock-panel" style="display:none;"></div>
+
+<script>
+  // Renders one tile per printer. State arrives as snapshots over a WS;
+  // we keep a map by id and re-render that tile only. camLabels caches the
+  // wall-clock time we first observed each snapshot_seq so the "cam · HH:MM"
+  // stamp doesn't flicker on every MQTT temp tick. lastSnap holds the most
+  // recent snapshot per id so a periodic timer can re-render disconnected
+  // tiles to advance "reconnecting..." past its grace window even when no
+  // new MQTT messages have arrived.
+  const tiles     = new Map();
+  const camLabels = new Map();  // id -> {seq, label}
+  const lastSnap  = new Map();  // id -> snap
+  const grid      = document.getElementById('dash-grid');
+
+  // Camera refresh is decoupled from the WS/MQTT render cycle. The backend
+  // writes a fresh JPEG every SNAPSHOT_INTERVAL_SEC, but renders only fire on
+  // MQTT deltas — so an idle printer's tile would otherwise hold a stale frame
+  // until the next state change. `camBust` is a cache-buster bumped on its own
+  // timer (below); render() stamps it into the <img> src, and the timer also
+  // repoints existing <img> tags so the picture advances even with no WS
+  // traffic. The /snapshot route sends no-store, so each new URL pulls the
+  // latest frame off disk.
+  let camBust = 0;
+
+  function camLabelFor(snap) {
+    const seq = snap.snapshot_seq ?? 0;
+    const prev = camLabels.get(snap.id);
+    if (prev && prev.seq === seq) return prev.label;
+    const now = new Date();
+    const label = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+    camLabels.set(snap.id, { seq, label });
+    return label;
+  }
+
+  const fmtTemp = v => (v === undefined || v === null) ? '—' : Math.round(v) + '°';
+  const fmtMins = m => {
+    if (!m && m !== 0) return '—';
+    const h = Math.floor(m / 60), mm = m % 60;
+    return h ? `${h}h${String(mm).padStart(2,'0')}m` : `${mm}m`;
+  };
+  // Bambu sends colours as 8-char hex AARRGGBB or RRGGBBAA depending on
+  // model — we just take the first 6 chars, which is RGB on every firmware
+  // I've seen and is good enough for a swatch.
+  const swatchColor = hex => {
+    if (!hex || hex.length < 6) return '#E5E7EB';
+    return '#' + hex.slice(0, 6);
+  };
+  const stateClass = s => {
+    s = (s || '').toUpperCase();
+    if (s === 'RUNNING') return 'running';
+    if (s === 'FINISH')  return 'finish';
+    if (s === 'PAUSE')   return 'pause';
+    if (s === 'FAILED')  return 'failed';
+    return 'idle';
+  };
+
+  // The /data/Metadata/plate_*.gcode path is what the printer uses for any
+  // SD-card or sneakernet upload (Bambu strips the original filename when it
+  // extracts the gcode out of the 3MF). It tells us nothing useful, so mask
+  // it as "Local print" instead of showing a meaningless system path.
+  // Filename resolution order: live subtask_name from the report → name we
+  // eavesdropped from a project_file command on the request topic → basename
+  // of gcode_file → masked-generic fallback.
+  const GENERIC_GCODE_RE = /^\/data\/Metadata\/plate_\d+\.gcode$/;
+  function displayFile(snap, p) {
+    const live = (p.subtask_name || '').trim();
+    if (live) return { label: live, generic: false };
+    const captured = (snap.captured_filename || '').trim();
+    if (captured) return { label: captured, generic: false };
+    const gf = (p.gcode_file || '').trim();
+    if (!gf) return { label: '', generic: false };
+    if (GENERIC_GCODE_RE.test(gf)) return { label: 'Local print (no filename sent)', generic: true };
+    const base = gf.split('/').pop();
+    return { label: base || gf, generic: false };
+  }
+
+  function render(snap) {
+    lastSnap.set(snap.id, snap);
+    let tile = tiles.get(snap.id);
+    if (!tile) {
+      tile = document.createElement('div');
+      tile.className = 'printer-tile';
+      grid.appendChild(tile);
+      tiles.set(snap.id, tile);
+    }
+
+    const p   = (snap.report && snap.report.print) || {};
+    const ams = (p.ams && p.ams.ams) || [];
+    const stateRaw = p.gcode_state || (snap.online ? 'IDLE' : 'OFFLINE');
+    const cls      = snap.online ? stateClass(stateRaw) : 'offline';
+    const pct      = (typeof p.mc_percent === 'number') ? p.mc_percent : 0;
+    const layer    = p.layer_num, totalLayer = p.total_layer_num;
+    const fileInfo = displayFile(snap, p);
+    // Chamber temp lives in either chamber_temper (newer firmware delta) or
+    // device.ctc.info.temp (pushall snapshot — "ctc" = chamber temp control).
+    // Either can be present; prefer the explicit one when set.
+    const chamber = (p.chamber_temper !== undefined && p.chamber_temper !== null)
+      ? p.chamber_temper
+      : (p.device && p.device.ctc && p.device.ctc.info && p.device.ctc.info.temp);
+
+    const amsHtml = ams.map((unit, i) => {
+      const slots = (unit.tray || []).map(t => {
+        if (!t.tray_type && !t.tray_color) {
+          return `<div class="slot empty"><div class="swatch" style="background:#eee"></div><div class="meta"><span>—</span><span>—</span></div></div>`;
+        }
+        const remain = (t.remain !== undefined && t.remain !== -1) ? `${t.remain}%` : '';
+        return `<div class="slot">
+          <div class="swatch" style="background:${swatchColor(t.tray_color)}"></div>
+          <div class="meta"><span class="type">${t.tray_type || ''}</span><span>${remain}</span></div>
+        </div>`;
+      }).join('');
+      return `<div class="ams-unit"><div class="ams-label">AMS ${i+1}</div>${slots}</div>`;
+    }).join('');
+
+    // Suppress the raw last_error during the normal reconnect window.
+    // Bambu's broker enforces single-client-per-credentials, so opening
+    // Bambu Studio briefly kicks our session — paho reconnects in ~2-30s
+    // and we don't want that flash to look like a real failure on the
+    // kiosk. After 30s without a recovery, we surface the actual error.
+    const RECONNECT_GRACE_SEC = 30;
+    let errLine;
+    if (snap.online) {
+      errLine = `<div class="conn-line">connected</div>`;
+    } else if (snap.disconnected_at
+               && (Date.now() / 1000 - snap.disconnected_at) < RECONNECT_GRACE_SEC) {
+      errLine = `<div class="conn-line">reconnecting…</div>`;
+    } else if (snap.last_error) {
+      errLine = `<div class="conn-line err">${snap.last_error}</div>`;
+    } else {
+      errLine = `<div class="conn-line">connecting…</div>`;
+    }
+
+    // Cache-bust the camera image with the per-printer "snapshot version"
+    // we bump every time _snapshot_loop() finishes successfully. That avoids
+    // clobbering the previous image with a broken-img X if the next refresh
+    // fails — we only swap when there's a fresh JPEG on disk.
+    //
+    // webcam_enabled=false (set per-printer in printers.json) skips this
+    // block entirely so the tile renders without an empty cam frame.
+    let camHtml = '';
+    if (snap.webcam_enabled !== false) {
+      camHtml = `
+        <div class="cam-wrap">
+          ${snap.snapshot_ok
+            ? `<img data-cam="${snap.id}" src="/snapshot/${snap.id}.jpg?v=${camBust}" alt="" onerror="this.style.display='none'">
+               <div class="cam-stamp">cam · ${camLabelFor(snap)}</div>`
+            : `<span class="cam-empty">${snap.snapshot_error ? 'camera: ' + snap.snapshot_error : 'waiting for camera…'}</span>`}
+        </div>`;
+    }
+
+    const fileTitle = fileInfo.label && !fileInfo.generic ? ` title="${fileInfo.label}"` : '';
+    const fileLabel = fileInfo.label
+      ? (fileInfo.generic ? `<em>${fileInfo.label}</em>` : `<strong>${fileInfo.label}</strong>`)
+      : '<em>no active job</em>';
+
+    const sd = snap.sd_card;
+    // Distinguish warm-up (probe hasn't run yet — common in the first
+    // ~30s after a dashboard restart) from a real miss. The probe sets
+    // sd_card_probed_at on success and sd_card_error on failure, so
+    // both being null means "still checking".
+    let sdHtml;
+    if (sd) {
+      sdHtml = `<div class="pt-sdcard">SD: <a href="/sd-cards" title="${sd.uuid}">${sd.name}</a></div>`;
+    } else if (!snap.sd_card_probed_at && !snap.sd_card_error) {
+      sdHtml = `<div class="pt-sdcard empty">SD: checking…</div>`;
+    } else {
+      sdHtml = `<div class="pt-sdcard empty">SD: not detected</div>`;
+    }
+
+    tile.innerHTML = `
+      <div class="pt-head">
+        <div>
+          <h2 class="pt-title">${snap.label || snap.id}</h2>
+          <div class="pt-model">${snap.model || ''}</div>
+          ${sdHtml}
+        </div>
+        <span class="badge ${cls}">${snap.online ? stateRaw : 'OFFLINE'}</span>
+      </div>
+
+      ${camHtml}
+
+      <div class="file-row"${fileTitle}>${fileLabel}</div>
+
+      <div class="pct-row">
+        <span class="pct">${pct}%</span>
+        <span class="eta">${fmtMins(p.mc_remaining_time)} left</span>
+      </div>
+      <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
+
+      <div class="stats">
+        <div class="stat"><div class="lbl">Nozzle</div><div class="val">${fmtTemp(p.nozzle_temper)}</div><div class="sub">→ ${fmtTemp(p.nozzle_target_temper)}</div></div>
+        <div class="stat"><div class="lbl">Bed</div><div class="val">${fmtTemp(p.bed_temper)}</div><div class="sub">→ ${fmtTemp(p.bed_target_temper)}</div></div>
+        ${(snap.model || '').toUpperCase().startsWith('P1')
+          ? ''
+          : `<div class="stat"><div class="lbl">Chamber</div><div class="val">${fmtTemp(chamber)}</div><div class="sub">&nbsp;</div></div>`}
+        <div class="stat"><div class="lbl">Layer</div><div class="val">${layer ?? '—'}${totalLayer ? ' / ' + totalLayer : ''}</div><div class="sub">&nbsp;</div></div>
+      </div>
+
+      ${ams.length ? `<div class="ams-row">${amsHtml}</div>` : ''}
+
+      ${errLine}
+    `;
+  }
+
+  // Auto-reconnecting WebSocket. The dashboard runs unattended on a
+  // kiosk, so any blip (server restart, network hiccup) needs to recover
+  // without a human reloading the page.
+  let backoff = 1000;
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/printers`);
+    ws.onopen    = () => { backoff = 1000; };
+    ws.onmessage = ev => { try { render(JSON.parse(ev.data)); } catch (e) {} };
+    ws.onclose   = () => { setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 15000); };
+    ws.onerror   = () => { try { ws.close(); } catch (e) {} };
+  }
+  connect();
+
+  // Initial render from the server-side snapshot, so the page isn't blank
+  // for the first WS round-trip.
+  const initial = {{ printers | tojson }};
+  initial.forEach(render);
+
+  // Re-render any tile that's currently in the disconnect grace window
+  // every few seconds, so "reconnecting..." advances to the real error
+  // after RECONNECT_GRACE_SEC even without fresh MQTT traffic.
+  setInterval(() => {
+    for (const snap of lastSnap.values()) {
+      if (!snap.online && snap.disconnected_at) render(snap);
+    }
+  }, 5000);
+
+  // Advance the camera frames independently of WS traffic. Every tick we bump
+  // the cache-buster and repoint each live <img> at the new URL, which forces
+  // the browser past its in-memory image cache to refetch the latest JPEG.
+  // Resetting display:'' lets a tile that errored on a transient miss recover.
+  setInterval(() => {
+    camBust++;
+    for (const img of document.querySelectorAll('img[data-cam]')) {
+      const id = img.getAttribute('data-cam');
+      img.style.display = '';
+      img.src = `/snapshot/${id}.jpg?v=${camBust}`;
+    }
+  }, 8000);
+
+  // In-stock filament panel below the printer tiles. Polled from /api/filaments
+  // (staff curate it on the Filaments tab) so the kiosk stays current without a
+  // reload. Inventory changes rarely, so a 30s poll is plenty.
+  const stockEl = document.getElementById('filament-stock');
+  function escText(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function renderStock(items) {
+    const onHand = (items || []).filter(i => i.on_hand);
+    if (!onHand.length) { stockEl.style.display = 'none'; stockEl.innerHTML = ''; return; }
+    onHand.sort((a, b) => (a.low - b.low) || a.name.localeCompare(b.name));
+    stockEl.style.display = '';
+    stockEl.innerHTML =
+      `<div class="stock-head">Filament in stock <span class="stock-count">${onHand.length}</span></div>` +
+      '<div class="stock-chips">' +
+      onHand.map(i => `<span class="stock-chip${i.low ? ' low' : ''}">` +
+        `<span class="stock-sw${/silk/i.test(i.name) ? ' silk' : ''}" style="background:${i.swatch_css || i.hex}">` +
+        (i.low ? '<span class="stock-low">LOW</span>' : '') +
+        '</span>' +
+        `<span class="stock-name">${escText(i.name)}</span>` +
+        '</span>').join('') +
+      '</div>';
+  }
+  async function refreshStock() {
+    try {
+      const r = await fetch('/api/filaments');
+      if (r.ok) renderStock((await r.json()).items);
+    } catch (e) { /* keep last render */ }
+  }
+  refreshStock();
+  setInterval(refreshStock, 30000);
+</script>
+{% endblock %}

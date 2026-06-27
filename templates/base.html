@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}Makerspace Print Intake{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css?v={{ asset_v() }}">
+</head>
+<body>
+<header>
+  <div class="container">
+    <div class="brand">
+      <h1>Makerspace @ McLean Branch</h1>
+      <p class="subtitle">3D Print Intake</p>
+    </div>
+    <nav>
+      <a href="/">New order</a>
+      <a href="/history">Order history</a>
+      <a href="/dashboard">Dashboard</a>
+      <a href="/jobs">Jobs log</a>
+      <a href="/sd-cards">SD cards</a>
+      <a href="/filaments">Filaments</a>
+      <a href="/feedback">Feedback</a>
+      <a href="/ledger.csv">Download ledger</a>
+      {# Active-staff selector. Saved to localStorage so the choice
+         persists across pages and browser restarts (per-device).
+         Pages that print a receipt read window.activeStaff() to
+         populate the "Order taken by:" field. #}
+      <label class="staff-picker">
+        Staff:
+        <select id="staff-select" autocomplete="off">
+          <option value="">— pick —</option>
+          <option value="Alex">Alex</option>
+          <option value="Amanda">Amanda</option>
+          <option value="Aspen">Aspen</option>
+          <option value="Sheila">Sheila</option>
+          <option value="Waren">Waren</option>
+        </select>
+      </label>
+    </nav>
+  </div>
+</header>
+<script>
+  // Persist the active staff name across pages via localStorage. Any
+  // page that prints a receipt calls window.activeStaff() to get the
+  // current value (empty string if nothing's picked yet).
+  (function() {
+    const KEY = 'bambucli.activeStaff';
+    const sel = document.getElementById('staff-select');
+    if (!sel) return;
+    const saved = localStorage.getItem(KEY) || '';
+    if (saved) sel.value = saved;
+    sel.addEventListener('change', () => {
+      localStorage.setItem(KEY, sel.value);
+    });
+    window.activeStaff = () => localStorage.getItem(KEY) || '';
+  })();
+</script>
+<main class="container">
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

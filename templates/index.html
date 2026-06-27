@@ -1,0 +1,617 @@
+{% extends "base.html" %}
+{% block content %}
+<form method="POST" action="/submit" enctype="multipart/form-data" class="card" id="intake-form">
+  <h2>New Print Order</h2>
+
+  <div class="field">
+    <label>Intake type</label>
+    <div class="radio-row">
+      <label>
+        <input type="radio" name="intake" value="slice" checked>
+        <span>Upload STL(s) — we slice</span>
+      </label>
+      <label>
+        <input type="radio" name="intake" value="import">
+        <span>Upload pre-sliced 3MF(s)</span>
+      </label>
+      <label>
+        <input type="radio" name="intake" value="email">
+        <span>From patron email (.eml)</span>
+      </label>
+    </div>
+  </div>
+
+  <div class="field email-only" style="display:none;">
+    <label for="eml-file">Patron email</label>
+    <input type="file" id="eml-file" accept=".eml">
+    <small>Drop the .eml here — we extract attached STLs and ask Ollama to
+    pre-fill name, card, colour, and quantity. Review the table below before
+    submitting; edit anything that's wrong.</small>
+    <div id="eml-status" style="margin-top:8px;"></div>
+    <div id="eml-links" style="margin-top:8px;"></div>
+  </div>
+
+  <input type="hidden" name="workdir_token" id="workdir-token" value="">
+  <input type="hidden" name="format" value="">
+
+  <div class="field slice-only">
+    <label for="printer">Target printer</label>
+    <select id="printer" name="printer">
+      <option value="x1c" selected>Bambu Lab X1 Carbon</option>
+      <option value="p1s">Bambu Lab P1S</option>
+    </select>
+    <small>Picks the right machine profile + start gcode + printer-model-id baked into the 3MF.</small>
+  </div>
+
+  <div class="field">
+    <label for="customer">Patron name</label>
+    <input id="customer" name="customer" required autocomplete="off">
+  </div>
+
+  <div class="field">
+    <label class="staff-toggle" style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer;">
+      <input type="checkbox" id="staff-print" name="staff" value="1" style="width:auto; margin:0;">
+      <span>Staff print — no library card</span>
+    </label>
+  </div>
+
+  <div class="field" id="card-field">
+    <label for="card">Library card (14 digits)</label>
+    <input id="card" name="card" pattern="[0-9 ]{14,}" required autocomplete="off"
+           placeholder="29342503188115 or 293425 0318 8115">
+  </div>
+
+  <div class="field">
+    <label>Files</label>
+    <button type="button" class="button secondary" id="add-files-btn">+ Add file</button>
+    <input type="file" id="file-picker" accept=".stl" multiple style="display:none;">
+
+    <input type="file"   name="files"            id="files"            style="display:none;" multiple>
+    <input type="hidden" name="quantity"         id="quantity-hidden"  value="">
+    <input type="hidden" name="colors"           id="colors-hidden"    value="">
+    <input type="hidden" name="scale"            id="scale-hidden"     value="1.0">
+    <input type="hidden" name="import_metadata"  id="import-metadata"  value="">
+
+    <table class="uploads" id="uploads-table" style="display:none;">
+      <thead id="uploads-thead"></thead>
+      <tbody id="uploads-tbody"></tbody>
+    </table>
+    <p class="empty-msg" id="empty-msg">No files added yet.</p>
+
+    <small class="slice-only">
+      <strong>Colour</strong> and <strong>scale</strong> are per-file.
+      Mixing scales (e.g. one row at <code>1.0</code>, two at <code>1.25</code>)
+      runs separate slice passes and merges them into one multi-plate 3MF.
+    </small>
+    <small class="slice-only color-naming-hint">
+      <strong>Colour naming:</strong> type a colour (<code>Blue</code>, <code>Silk Gold</code>).
+      Add a finish — <code>silk</code>, <code>dark</code>, <code>light</code>, <code>matte</code>
+      (e.g. <code>Silk Red</code>, <code>Dark Teal</code>) — or use a metallic
+      (<code>Silver</code>, <code>Gold</code>, <code>Copper</code>),
+      <code>Glow in the Dark</code>, or <code>Rainbow</code>.
+      For multi-colour filament (2–3), combine names with
+      <code>/</code>, <code>&amp;</code>, <code>+</code>, or <code>and</code> —
+      e.g. <code>Red / Blue</code>, <code>White + Red + Black</code>.
+    </small>
+    <small class="import-only" style="display:none;">
+      Per-plate colours auto-detected from each 3MF; tweak if the detected name
+      is off. Multiple 3MFs are kept as separate orders for the same patron — you'll
+      get one receipt and one ledger row per file.
+    </small>
+  </div>
+
+  <button type="submit" class="primary">Process order</button>
+</form>
+
+<script>
+(function() {
+  // Slice-mode: per-STL rows
+  let entries = [];                // [{file, qty, color, scale}]
+  // Import-mode: per-FILE groups, each with N plate rows
+  let importFiles = [];            // [{file, plates:[{plate,color,filaments,...}], inspecting:bool}]
+
+  const picker     = document.getElementById('file-picker');
+  const filesIn    = document.getElementById('files');
+  const qtyIn      = document.getElementById('quantity-hidden');
+  const colorsIn   = document.getElementById('colors-hidden');
+  const scaleIn    = document.getElementById('scale-hidden');
+  const metaIn     = document.getElementById('import-metadata');
+  const addBtn     = document.getElementById('add-files-btn');
+  const tbody      = document.getElementById('uploads-tbody');
+  const thead      = document.getElementById('uploads-thead');
+  const emptyMsg   = document.getElementById('empty-msg');
+  const table      = document.getElementById('uploads-table');
+  const form       = document.getElementById('intake-form');
+  const radios     = document.querySelectorAll('input[name="intake"]');
+
+  // Staff print toggle: when on, the library-card field is hidden, cleared,
+  // and made non-required (a disabled input isn't submitted, so the backend
+  // stamps card="STAFF" off the staff=1 flag instead).
+  const staffChk  = document.getElementById('staff-print');
+  const cardField = document.getElementById('card-field');
+  const cardInput = document.getElementById('card');
+  function syncStaff() {
+    const on = staffChk.checked;
+    cardInput.disabled = on;
+    cardInput.required = !on;
+    if (on) cardInput.value = '';
+    cardField.style.display = on ? 'none' : '';
+  }
+  staffChk.addEventListener('change', syncStaff);
+  syncStaff();
+
+  function isSlice() {
+    const v = document.querySelector('input[name="intake"]:checked').value;
+    // Email mode renders the same slice-mode table; the only difference is
+    // how the entries[] array gets populated (via /intake/email instead of
+    // a manual file picker).
+    return v === 'slice' || v === 'email';
+  }
+  function isEmail() {
+    return document.querySelector('input[name="intake"]:checked').value === 'email';
+  }
+  function intakeMode() {
+    return document.querySelector('input[name="intake"]:checked').value;
+  }
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n/1024).toFixed(1) + ' KB';
+    return (n/1024/1024).toFixed(1) + ' MB';
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
+  }
+
+  function makeInput(type, value, onInput, props) {
+    const el = document.createElement('input');
+    el.type = type; el.value = value;
+    Object.assign(el, props || {});
+    el.addEventListener('input', onInput);
+    return el;
+  }
+
+  function makeDelBtn(onClick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'remove-btn';
+    b.title = 'Remove';
+    b.textContent = '✕';
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function setHeader(cols) {
+    thead.innerHTML = '<tr>' + cols.map(c => `<th class="${c.cls || ''}">${c.label}</th>`).join('') + '</tr>';
+  }
+
+  function render() {
+    tbody.innerHTML = '';
+
+    if (isSlice()) {
+      setHeader([
+        {label: 'File'},
+        {label: 'Qty',    cls: 'qty-col'},
+        {label: 'Colour', cls: 'color-col'},
+        {label: 'Scale',  cls: 'scale-col'},
+        {label: '',       cls: 'remove-col'},
+      ]);
+      entries.forEach((e, idx) => {
+        const tr = document.createElement('tr');
+        const td0 = document.createElement('td');
+        td0.innerHTML = `${escapeHtml(e.file.name)} <small>(${fmtBytes(e.file.size)})</small>`;
+        tr.appendChild(td0);
+        const td1 = document.createElement('td'); td1.className = 'qty-col';
+        td1.appendChild(makeInput('number', e.qty, ev => {
+          const v = parseInt(ev.target.value, 10);
+          e.qty = (Number.isFinite(v) && v > 0) ? v : 1;
+        }, {min: '1'}));
+        tr.appendChild(td1);
+        const td2 = document.createElement('td'); td2.className = 'color-col';
+        td2.appendChild(makeInput('text', e.color, ev => { e.color = ev.target.value; },
+          {placeholder: 'Black', autocomplete: 'off'}));
+        tr.appendChild(td2);
+        const td3 = document.createElement('td'); td3.className = 'scale-col';
+        td3.appendChild(makeInput('number', e.scale, ev => {
+          const v = parseFloat(ev.target.value);
+          e.scale = (Number.isFinite(v) && v > 0) ? v : 1.0;
+        }, {step: '0.01', min: '0.1', max: '5'}));
+        tr.appendChild(td3);
+        const td4 = document.createElement('td'); td4.className = 'remove-col';
+        td4.appendChild(makeDelBtn(() => { entries.splice(idx, 1); render(); }));
+        tr.appendChild(td4);
+        tbody.appendChild(tr);
+      });
+      table.style.display = entries.length ? '' : 'none';
+      emptyMsg.style.display = entries.length ? 'none' : '';
+      return;
+    }
+
+    // Import mode: file groups, each with header + plate rows
+    setHeader([
+      {label: 'Plate',  cls: 'qty-col'},
+      {label: 'Colour', cls: 'color-col'},
+      {label: 'Time',   cls: 'scale-col'},
+      {label: 'Mass',   cls: 'scale-col'},
+      {label: 'Objects'},
+      {label: '',       cls: 'remove-col'},
+    ]);
+
+    importFiles.forEach((fe, fileIdx) => {
+      const headerTr = document.createElement('tr');
+      headerTr.className = 'file-group-header';
+      const headerTd = document.createElement('td');
+      headerTd.colSpan = 6;
+      const labelSpan = document.createElement('span');
+      labelSpan.innerHTML = `<strong>${escapeHtml(fe.file.name)}</strong> <small>(${fmtBytes(fe.file.size)})</small>`;
+      headerTd.appendChild(labelSpan);
+      const removeBtn = makeDelBtn(() => {
+        importFiles.splice(fileIdx, 1);
+        render();
+      });
+      removeBtn.style.float = 'right';
+      headerTd.appendChild(removeBtn);
+      headerTr.appendChild(headerTd);
+      tbody.appendChild(headerTr);
+
+      if (fe.inspecting) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6; td.className = 'inspecting-cell';
+        td.textContent = 'Inspecting…';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      if (!fe.plates.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 6; td.className = 'inspecting-cell';
+        td.textContent = 'No plate info detected.';
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      fe.plates.forEach(p => {
+        const tr = document.createElement('tr');
+
+        const td0 = document.createElement('td'); td0.className = 'qty-col';
+        td0.textContent = p.plate;
+        tr.appendChild(td0);
+
+        const td1 = document.createElement('td'); td1.className = 'color-col';
+        const wrap = document.createElement('div');
+        wrap.style.display = 'flex'; wrap.style.alignItems = 'center';
+        wrap.style.gap = '6px'; wrap.style.flexWrap = 'wrap';
+        (p.filaments || []).forEach(f => {
+          const sw = document.createElement('span');
+          sw.className = 'color-swatch';
+          sw.style.background = f.color_hex || '#999';
+          sw.title = `Slot ${f.slot}: ${f.color_name || f.color_hex} — ${f.used_g}g`;
+          wrap.appendChild(sw);
+        });
+        const inp = makeInput('text', p.color, ev => { p.color = ev.target.value; },
+          {placeholder: 'Colour name', autocomplete: 'off'});
+        inp.style.flex = '1'; inp.style.minWidth = '120px';
+        wrap.appendChild(inp);
+        td1.appendChild(wrap);
+        tr.appendChild(td1);
+
+        const td2 = document.createElement('td'); td2.className = 'scale-col';
+        td2.textContent = p.time_label;
+        tr.appendChild(td2);
+
+        const td3 = document.createElement('td'); td3.className = 'scale-col';
+        td3.textContent = (p.filament_g || 0).toFixed(1) + ' g';
+        tr.appendChild(td3);
+
+        const td4 = document.createElement('td');
+        td4.innerHTML = (p.objects || []).map(o => `<small>${escapeHtml(o)}</small>`).join('<br>');
+        tr.appendChild(td4);
+
+        const td5 = document.createElement('td'); td5.className = 'remove-col';
+        tr.appendChild(td5);
+
+        tbody.appendChild(tr);
+      });
+    });
+
+    const hasContent = importFiles.length > 0;
+    table.style.display = hasContent ? '' : 'none';
+    emptyMsg.style.display = hasContent ? 'none' : '';
+  }
+
+  function updateFlow() {
+    const mode = intakeMode();
+    const slice = isSlice();   // true for slice OR email
+    document.querySelectorAll('.slice-only').forEach(el => el.style.display = slice ? '' : 'none');
+    document.querySelectorAll('.import-only').forEach(el => el.style.display = mode === 'import' ? '' : 'none');
+    document.querySelectorAll('.email-only').forEach(el => el.style.display = mode === 'email' ? '' : 'none');
+    // Email mode hides the manual "+ Add file" button — STLs come from the .eml.
+    addBtn.style.display = mode === 'email' ? 'none' : '';
+    picker.accept   = mode === 'import' ? '.3mf' : '.stl';
+    picker.multiple = true;
+    if (slice) {
+      importFiles = [];
+    } else {
+      entries = [];
+    }
+    if (mode !== 'email') {
+      // Switching out of email mode: clear any prefilled state.
+      document.getElementById('workdir-token').value = '';
+      document.getElementById('eml-status').textContent = '';
+    }
+    render();
+  }
+
+  // ---------------- Email-intake handler ----------------
+  // Strategy: when the user picks an .eml, we POST it to /intake/email.
+  // Server extracts the STLs into a workdir and asks Ollama for the parse.
+  // Response gives us the parsed fields + STL filenames + a workdir token.
+  // We then GET each STL back via /intake/email/file/<token>/<name> and turn
+  // them into File objects, populating the same `entries` array that the
+  // slice flow uses. From there, normal slice-mode submit takes over.
+
+  const emlInput  = document.getElementById('eml-file');
+  const emlStatus = document.getElementById('eml-status');
+  const emlLinks  = document.getElementById('eml-links');
+  const tokenIn   = document.getElementById('workdir-token');
+
+  // Tracks whether the most recent .eml parse found share-kind links AND no
+  // STL attachments. In that state we block submit — staff must manually
+  // download the linked file(s) and switch back to STL/3MF upload mode.
+  let emailBlocked = false;
+
+  function renderLinkWarnings(links, hasFiles) {
+    emlLinks.innerHTML = '';
+    emailBlocked = false;
+    if (!links || !links.length) return;
+
+    const share = links.filter(l => l.kind === 'share');
+    const other = links.filter(l => l.kind === 'other');
+
+    function makeBox(bg, border, color, html) {
+      const div = document.createElement('div');
+      div.style.cssText =
+        `padding:10px 12px; border-radius:6px; margin-top:6px;` +
+        `background:${bg}; border:1px solid ${border}; color:${color};` +
+        `font-size:0.9em;`;
+      div.innerHTML = html;
+      return div;
+    }
+
+    function linkList(arr) {
+      return '<ul style="margin:6px 0 0; padding-left:20px;">' +
+        arr.map(l =>
+          `<li><a href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">` +
+          `${escapeHtml(l.url)}</a> <small>(${escapeHtml(l.host)})</small></li>`
+        ).join('') +
+        '</ul>';
+    }
+
+    if (share.length && !hasFiles) {
+      emailBlocked = true;
+      emlLinks.appendChild(makeBox(
+        '#fde2e2', '#c33', '#7a1414',
+        `<strong>⚠ Cannot submit — patron sent files via link, not as attachments.</strong>` +
+        `<div style="margin-top:4px;">Open the link(s) below in a new tab, manually download the STL/3MF file, then switch to <em>"Upload STL(s)"</em> or <em>"Upload pre-sliced 3MF(s)"</em> mode and proceed normally.</div>` +
+        linkList(share)
+      ));
+    } else if (share.length) {
+      emlLinks.appendChild(makeBox(
+        '#fff4d6', '#d4a017', '#5a3d00',
+        `<strong>⚠ Email also references file-share links.</strong> ` +
+        `STL attachments were extracted, but the patron may have intended ` +
+        `additional files via these links. Verify nothing is missing:` +
+        linkList(share)
+      ));
+    }
+
+    if (other.length) {
+      emlLinks.appendChild(makeBox(
+        '#eef3f8', '#9bb', '#345',
+        `<small>${other.length} other link${other.length === 1 ? '' : 's'} in body (informational):` +
+        linkList(other) +
+        '</small>'
+      ));
+    }
+  }
+
+  async function fetchAsFile(url, name) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`fetch ${name}: HTTP ${r.status}`);
+    const blob = await r.blob();
+    return new File([blob], name, { type: 'application/octet-stream' });
+  }
+
+  async function handleEmlUpload(file) {
+    emlStatus.innerHTML = '<em>Extracting + asking Ollama…</em>';
+    entries = [];
+    render();
+    try {
+      const fd = new FormData();
+      fd.append('eml', file);
+      const r = await fetch('/intake/email', { method: 'POST', body: fd });
+      if (!r.ok) {
+        const detail = await r.text();
+        throw new Error(`HTTP ${r.status}: ${detail.slice(0, 200)}`);
+      }
+      const data = await r.json();
+      tokenIn.value = data.workdir_token;
+
+      // Pre-fill customer + card
+      if (data.parsed.customer) document.getElementById('customer').value = data.parsed.customer;
+      if (data.parsed.card)     document.getElementById('card').value     = data.parsed.card;
+
+      // Per-STL color/qty are CSV; split back into arrays
+      const colors = (data.parsed.colors || '').split(',');
+      const qtys   = (data.parsed.quantity || '').split(',');
+
+      // Fetch each STL back from the host so we can re-attach to the form
+      emlStatus.innerHTML = `<em>Fetching ${data.files.length} STL file(s)…</em>`;
+      const stlFiles = await Promise.all(data.files.map(f =>
+        fetchAsFile(`/intake/email/file/${encodeURIComponent(data.workdir_token)}/${encodeURIComponent(f.name)}`, f.name)
+      ));
+
+      // Build the entries[] array the slice flow expects
+      stlFiles.forEach((file, i) => {
+        entries.push({
+          file: file,
+          qty: parseInt(qtys[i] || '1', 10) || 1,
+          color: (colors[i] || '').trim(),
+          scale: 1.0,
+        });
+      });
+      render();
+
+      const ollamaTag = data.parsed.ollama_used
+        ? '<strong style="color:#2a7;">Ollama: parsed</strong>'
+        : '<strong style="color:#a52;">Ollama unreachable — regex fallback only</strong>';
+      emlStatus.innerHTML =
+        `Parsed from <code>${escapeHtml(data.from || '(unknown sender)')}</code>. ${ollamaTag}. ` +
+        `<strong>Review the table below before submitting.</strong>`;
+
+      // Surface any URLs found in the body — share-kind links are a strong
+      // signal that the patron sent files via link instead of attachment.
+      renderLinkWarnings(data.parsed.links || [], stlFiles.length > 0);
+    } catch (e) {
+      emlStatus.innerHTML = `<strong style="color:#c33;">Failed: ${escapeHtml(e.message)}</strong>`;
+      emlLinks.innerHTML = '';
+      emailBlocked = false;
+    }
+  }
+
+  emlInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (f) handleEmlUpload(f);
+    emlInput.value = '';   // allow re-selecting the same file
+  });
+  // ---------------- end email handler ----------------
+
+  async function inspect3mf(f) {
+    const fe = {file: f, plates: [], inspecting: true};
+    importFiles.push(fe);
+    render();
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch('/inspect-3mf', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      fe.plates = (data.plates || []).map(p => {
+        const fils = (p.filaments && p.filaments.length)
+          ? p.filaments
+          : (p.color_hex ? [{color_hex: p.color_hex, color_name: p.color_name, used_g: p.filament_g, slot: '1'}] : []);
+        const joined = fils.map(f => f.color_name || f.color_hex || '').filter(Boolean).join(' + ');
+        return {
+          plate: p.plate,
+          color: joined,
+          filaments: fils,
+          time_label: p.time_label,
+          filament_g: p.filament_g,
+          objects: p.objects || [],
+        };
+      });
+    } catch (e) {
+      alert(`Inspect failed for ${f.name}: ${e.message}`);
+    } finally {
+      fe.inspecting = false;
+      render();
+    }
+  }
+
+  addBtn.addEventListener('click', () => picker.click());
+
+  picker.addEventListener('change', (e) => {
+    const slice = isSlice();
+    const newFiles = Array.from(e.target.files);
+    if (slice) {
+      const defaultColor = entries.length ? entries[entries.length - 1].color : '';
+      const defaultScale = entries.length ? entries[entries.length - 1].scale : 1.0;
+      newFiles.forEach(f => entries.push({
+        file: f, qty: 1, color: defaultColor, scale: defaultScale,
+      }));
+      render();
+    } else {
+      newFiles.forEach(f => inspect3mf(f));
+    }
+    picker.value = '';
+  });
+
+  form.addEventListener('submit', (e) => {
+    const slice = isSlice();
+    const mode = intakeMode();
+
+    if (mode === 'email' && emailBlocked) {
+      e.preventDefault();
+      alert('This email referenced files via link only — no STL attachments. ' +
+            'Open the linked file(s) in a new tab, download manually, and ' +
+            'switch to "Upload STL(s)" mode to submit.');
+      return;
+    }
+    if (slice && entries.length === 0) {
+      e.preventDefault();
+      alert(mode === 'email'
+        ? 'Drop an .eml file first; we need the STLs and parsed fields.'
+        : 'Add at least one STL.');
+      return;
+    }
+    if (!slice && importFiles.length === 0) {
+      e.preventDefault(); alert('Add at least one 3MF.'); return;
+    }
+    if (!slice && importFiles.some(fe => fe.inspecting)) {
+      e.preventDefault(); alert('Still inspecting one of the 3MFs — wait a moment.'); return;
+    }
+    // Email mode is a smart pre-fill of slice mode — backend only knows
+    // slice/import, so swap the intake radio before submit.
+    if (mode === 'email') {
+      document.querySelector('input[name="intake"][value="slice"]').checked = true;
+    }
+
+    if (slice) {
+      const missing = entries.find(en => !en.color.trim());
+      if (missing) { e.preventDefault(); alert(`Colour required for: ${missing.file.name}`); return; }
+      // Per-file scale is allowed; the backend buckets by (scale, colour).
+    } else {
+      for (const fe of importFiles) {
+        const missing = (fe.plates || []).find(p => !p.color.trim());
+        if (missing) {
+          e.preventDefault();
+          alert(`Colour required for plate ${missing.plate} of ${fe.file.name}.`);
+          return;
+        }
+      }
+    }
+
+    const dt = new DataTransfer();
+    if (slice) {
+      entries.forEach(en => dt.items.add(en.file));
+      qtyIn.value    = entries.map(en => en.qty).join(',');
+      colorsIn.value = entries.map(en => en.color.trim()).join(',');
+      scaleIn.value  = entries.map(en => String(en.scale)).join(',');
+      metaIn.value   = '';
+    } else {
+      importFiles.forEach(fe => dt.items.add(fe.file));
+      qtyIn.value    = '1';
+      // Backend looks up colors per file via metadata JSON; this top-level
+      // colors field stays empty for import.
+      colorsIn.value = '';
+      scaleIn.value  = '1.0';
+      metaIn.value   = JSON.stringify(importFiles.map(fe => ({
+        filename: fe.file.name,
+        colors: fe.plates.map(p => p.color.trim()),
+      })));
+    }
+    filesIn.files = dt.files;
+  });
+
+  radios.forEach(r => r.addEventListener('change', updateFlow));
+  updateFlow();
+})();
+</script>
+{% endblock %}

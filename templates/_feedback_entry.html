@@ -1,0 +1,24 @@
+<li class="feedback-entry{% if e.resolved %} resolved{% endif %}">
+  <div class="feedback-entry-meta">
+    <strong class="feedback-entry-author">{{ e.author or 'Anonymous' }}</strong>
+    <span class="dim feedback-entry-time">{{ e.created_at }}</span>
+    {% if e.resolved %}
+      <span class="feedback-badge feedback-badge-resolved">
+        resolved{% if e.resolved_by %} by {{ e.resolved_by }}{% endif %}
+        {% if e.resolved_at %} · {{ e.resolved_at }}{% endif %}
+      </span>
+    {% endif %}
+  </div>
+  <div class="feedback-entry-body">{{ e.body }}</div>
+  <div class="feedback-entry-actions">
+    {% if e.resolved %}
+      <button type="button" class="button-mini feedback-resolve-btn"
+              data-entry-id="{{ e.id }}" data-target-resolved="0">Reopen</button>
+    {% else %}
+      <button type="button" class="button-mini feedback-resolve-btn"
+              data-entry-id="{{ e.id }}" data-target-resolved="1">Mark resolved</button>
+    {% endif %}
+    <button type="button" class="button-mini feedback-delete-btn"
+            data-entry-id="{{ e.id }}">Delete</button>
+  </div>
+</li>

@@ -1,0 +1,315 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>{% if is_multi %}Order Group · {{ orders|length }} files{% else %}Order Processed{% endif %}</h2>
+
+  <dl class="summary">
+    <dt>Patron</dt>
+    <dd><strong>{{ customer }}</strong> — card {{ card }}</dd>
+
+    <dt>Total cost</dt>
+    <dd class="price">${{ "%.2f" % total_price }}</dd>
+
+    <dt>Total filament</dt>
+    <dd>{{ "%.1f" % total_grams }} g</dd>
+
+    <dt>Total time</dt>
+    <dd>{{ total_time_label }}</dd>
+
+    {% if is_multi %}
+    <dt>Files</dt>
+    <dd>{{ orders|length }} sliced 3MFs (each printed independently)</dd>
+    {% endif %}
+  </dl>
+
+  {% for order in orders %}
+    {# Capture the outer-loop index so the inner printer loop's data-* attrs
+       reference the correct order — Jinja's `loop` variable is shadowed by
+       the inner `{% for p in available_printers %}` and otherwise yields
+       the printer index, which broke openModal() for any printer past the
+       first when there's only one order. #}
+    {% set order_idx = loop.index0 %}
+    <div class="order-block">
+      <h3>{{ order.filename }}</h3>
+
+      {% if order.any_over_5h or order.any_outside_bed %}
+        <div class="warning">
+          {% if order.any_over_5h %}<p>At least one plate exceeds the 5-hour cap.</p>{% endif %}
+          {% if order.any_outside_bed %}<p>At least one plate has objects outside the build area.</p>{% endif %}
+        </div>
+      {% endif %}
+
+      <table class="plates">
+        <thead>
+          <tr>
+            <th>Plate</th>
+            <th>Colour</th>
+            <th>Grams</th>
+            <th>Time</th>
+            <th>Files</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in order.plates %}
+            <tr {% if p.over_5h %}class="row-warn"{% endif %}>
+              <td>{{ p.plate }}</td>
+              <td>{{ order.colors[loop.index0] if order.colors|length > 1 and loop.index0 < order.colors|length else (order.colors[0] if order.colors else '') }}</td>
+              <td>{{ "%.1f" % p.filament_g }}</td>
+              <td>{{ p.time_label }}{% if p.over_5h %} ⚠{% endif %}</td>
+              <td>
+                {% for obj in p.objects %}
+                  <div class="obj">{{ obj.name }}</div>
+                {% endfor %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="order-stats">
+        <span><strong>{{ order.plate_count }}</strong> {{ 'plate' if order.plate_count == 1 else 'plates' }}</span>
+        <span>· <strong>{{ "%.1f" % order.total_grams }}g</strong></span>
+        <span>· <strong>{{ order.total_time_label }}</strong></span>
+        <span>· <strong>${{ "%.2f" % order.price_cad }}</strong></span>
+      </div>
+
+      <div class="actions">
+        <a href="/download/{{ order.filename }}" class="button primary">Download 3MF</a>
+        <button type="button" class="button secondary print-receipt-btn"
+                data-order-idx="{{ loop.index0 }}">Print receipt</button>
+      </div>
+      <div class="receipt-status" data-status-idx="{{ loop.index0 }}"></div>
+
+      {% if available_printers %}
+      <div class="send-to-printer">
+        <span class="send-label">Save to SD on:</span>
+        {% for p in available_printers %}
+          {# Compatibility = sliced model_id matches printer model. BL-P001 is X1C, C11 is P1S. #}
+          {% set is_compat = (
+            (order.printer_model_id == 'BL-P001' and p.model == 'X1C') or
+            (order.printer_model_id == 'C11'    and p.model == 'P1S')
+          ) %}
+          <button type="button"
+                  class="button-mini send-btn{% if not is_compat %} send-btn-warn{% endif %}"
+                  data-order-idx="{{ order_idx }}"
+                  data-printer-id="{{ p.id }}"
+                  data-compat="{{ '1' if is_compat else '0' }}"
+                  {% if not p.online %}disabled title="{{ p.label }} is offline"{% endif %}>
+            {{ p.label }}{% if p.sd_card and p.sd_card.name %} <span class="sd-tag">({{ p.sd_card.name }})</span>{% endif %}{% if not is_compat %} ⚠{% endif %}
+          </button>
+        {% endfor %}
+      </div>
+      <div class="send-status" data-send-idx="{{ loop.index0 }}"></div>
+      {% endif %}
+    </div>
+  {% endfor %}
+
+{% if available_printers %}
+<div id="send-modal" class="modal-backdrop" style="display:none;">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="send-modal-title">
+    <h3 id="send-modal-title">Save to printer SD</h3>
+    <p class="modal-sub" id="send-modal-sub"></p>
+    <div id="send-modal-warn" class="warning" style="display:none;"></div>
+
+    <p class="hint">The file will be uploaded to the printer's SD card and
+      appear in the on-screen file list. Tap it on the touchscreen to
+      start the print.</p>
+
+    <div class="modal-actions">
+      <button type="button" class="button secondary" id="send-modal-cancel">Cancel</button>
+      <button type="button" class="button primary" id="send-modal-confirm">Save to SD</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+  <div class="actions">
+    {% if is_multi %}
+      <button type="button" class="button primary" id="print-all-btn">Print all receipts</button>
+    {% endif %}
+    <a href="/" class="button secondary">New order</a>
+  </div>
+</div>
+
+<script>
+  (function() {
+    const orders = {{ orders | tojson }};
+
+    async function printReceipt(idx) {
+      const order = orders[idx];
+      const btn = document.querySelector(`.print-receipt-btn[data-order-idx="${idx}"]`);
+      const status = document.querySelector(`.receipt-status[data-status-idx="${idx}"]`);
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Printing…';
+      status.className = 'receipt-status';
+      status.textContent = '';
+
+      const fd = new FormData();
+      fd.append('output_3mf', order.output_3mf);
+      fd.append('customer',   order.customer);
+      fd.append('card',       order.card);
+      fd.append('colors',     (order.colors || []).join(','));
+      if (order.sd_card) fd.append('sd_card', order.sd_card);
+      // Active staff from the persistent header dropdown. Empty when
+      // nothing's picked — slice_order falls back to its default.
+      const staff = (window.activeStaff && window.activeStaff()) || '';
+      if (staff) fd.append('order_taken_by', staff);
+
+      try {
+        const res = await fetch('/receipt', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        btn.textContent = '✓ Printed';
+        btn.classList.remove('secondary');
+        btn.classList.add('primary-done');
+        status.className = 'success-msg';
+        status.textContent = 'Receipt sent to the TM-T88V.';
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = original;
+        status.className = 'error-msg';
+        status.textContent = 'Print failed: ' + e.message;
+      }
+    }
+
+    document.querySelectorAll('.print-receipt-btn').forEach(btn => {
+      btn.addEventListener('click', () => printReceipt(parseInt(btn.dataset.orderIdx, 10)));
+    });
+
+    const printers = {{ available_printers | default([]) | tojson }};
+    const printerById = new Map(printers.map(p => [p.id, p]));
+
+    // Modal state — orderIdx + printerId of the currently-open save dialog.
+    const modal = document.getElementById('send-modal');
+    let pendingBtn = null;
+    let pendingOrder = null;
+    let pendingPrinter = null;
+
+    function openModal(orderIdx, printerId, compat) {
+      pendingOrder = orders[orderIdx];
+      pendingPrinter = printerById.get(printerId);
+      if (!pendingOrder || !pendingPrinter) return;
+      pendingBtn = document.querySelector(
+        `.send-btn[data-order-idx="${orderIdx}"][data-printer-id="${printerId}"]`
+      );
+      document.getElementById('send-modal-title').textContent =
+        `Save to ${pendingPrinter.label}`;
+      document.getElementById('send-modal-sub').textContent = pendingOrder.filename;
+
+      const warn = document.getElementById('send-modal-warn');
+      if (!compat) {
+        warn.style.display = '';
+        warn.innerHTML = `<p>This file was sliced for <strong>${pendingOrder.printer_model_id || 'an unknown model'}</strong> ` +
+          `but ${pendingPrinter.label} is a ${pendingPrinter.model}. ` +
+          `The printer's file list may refuse to start it — saving anyway.</p>`;
+      } else {
+        warn.style.display = 'none';
+      }
+      modal.style.display = '';
+    }
+
+    function closeModal() {
+      modal.style.display = 'none';
+      pendingBtn = null;
+      pendingOrder = null;
+      pendingPrinter = null;
+    }
+
+    document.getElementById('send-modal-cancel').addEventListener('click', closeModal);
+    modal.addEventListener('click', e => {
+      // Click on the backdrop (but not the inner card) closes.
+      if (e.target === modal) closeModal();
+    });
+
+    document.querySelectorAll('.send-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.orderIdx, 10);
+        const printerId = btn.dataset.printerId;
+        const compat = btn.dataset.compat === '1';
+        openModal(idx, printerId, compat);
+      });
+    });
+
+    document.getElementById('send-modal-confirm').addEventListener('click', async () => {
+      if (!pendingBtn || !pendingOrder || !pendingPrinter) return;
+
+      const idx       = pendingBtn.dataset.orderIdx;
+      // Tolerate a missing status div — the fetch should still go out even
+      // if the inline status banner can't be located.
+      const status    = document.querySelector(`.send-status[data-send-idx="${idx}"]`)
+                        || { className: '', textContent: '' };
+
+      const original = pendingBtn.textContent;
+      pendingBtn.disabled = true;
+      pendingBtn.textContent = 'Saving…';
+      status.className = 'send-status';
+      status.textContent = '';
+      const printerLabel = pendingPrinter.label;
+      const filename = pendingOrder.filename;
+      const printerId = pendingPrinter.id;
+      closeModal();
+
+      const fd = new FormData();
+      fd.append('printer_id', printerId);
+      fd.append('filename',   filename);
+
+      const btn = document.querySelector(
+        `.send-btn[data-order-idx="${idx}"][data-printer-id="${printerId}"]`
+      );
+
+      try {
+        const res = await fetch('/api/printers/send', { method: 'POST', body: fd });
+        if (!res.ok) {
+          const detail = (await res.text()).slice(0, 300);
+          throw new Error(`HTTP ${res.status}: ${detail}`);
+        }
+        // Record the resolved SD-card name on the order so a later
+        // receipt print includes it. order.sd_card is distinct from
+        // order.card (which is the patron's library-card number) —
+        // earlier we tried mutating order.card and clobbered the
+        // patron's library card on the printout, which is the bug
+        // Alex caught at 1.6.
+        let body = {};
+        try { body = await res.json(); } catch (e) {}
+        const sdName = body && body.sd_card && body.sd_card.name;
+        if (sdName) {
+          orders[idx].sd_card = sdName;
+        }
+        if (btn) {
+          btn.textContent = sdName
+            ? `✓ Saved to ${printerLabel} (${sdName})`
+            : `✓ Saved to ${printerLabel}`;
+          btn.classList.remove('send-btn-warn');
+          btn.classList.add('primary-done');
+        }
+        status.className = 'success-msg';
+        status.textContent = sdName
+          ? `Saved to ${printerLabel}'s SD card (${sdName}) — start it from the touchscreen.`
+          : `Saved to ${printerLabel}'s SD card — start it from the touchscreen.`;
+      } catch (e) {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = original;
+        }
+        status.className = 'error-msg';
+        status.textContent = 'Save failed: ' + e.message;
+      }
+    });
+
+    const printAllBtn = document.getElementById('print-all-btn');
+    if (printAllBtn) {
+      printAllBtn.addEventListener('click', async () => {
+        printAllBtn.disabled = true;
+        const original = printAllBtn.textContent;
+        printAllBtn.textContent = 'Printing all…';
+        for (let i = 0; i < orders.length; i++) {
+          await printReceipt(i);
+        }
+        printAllBtn.textContent = '✓ All receipts printed';
+        printAllBtn.classList.remove('primary');
+        printAllBtn.classList.add('primary-done');
+      });
+    }
+  })();
+</script>
+{% endblock %}

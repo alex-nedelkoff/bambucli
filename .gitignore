@@ -1,0 +1,68 @@
+# Patron data — MUST NOT be committed.
+# Contains library card numbers, email bodies, full names. MFIPPA-protected.
+printqueue/
+orders*.csv
+
+# Per-printer LAN access codes — printer-local secrets, don't commit.
+printers.json
+
+# Per-card friendly-name mapping (UUID → "R1"/"R2"/etc). Per-instance
+# config, not source. The UUIDs themselves live on the physical SD cards
+# in a hidden marker file; this just maps them to operational labels.
+sd_cards.json
+
+# Staff-curated filament colour inventory (on-hand flags + custom swatch hexes).
+# Per-instance data, not source. .bak.json is the auto-backup mirror.
+filaments.json
+filaments.bak.json
+
+# Live camera snapshots (overwritten on the printer_dashboard snapshot loop).
+snapshots/
+
+# Runtime cache (merged profile JSONs regenerated on each slice)
+.cache/
+
+# Slicer CLI scratch output (written to repo root on each slice)
+result.json
+
+# Dashboard runtime state (per-printer capture flags, rewritten live)
+printer_capture_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+._*
+
+# Logs (in case anything writes to repo root)
+*.log
+*.err
+
+# Backups / temp
+*.bak
+*.tmp
+
+# Early-exploration checkout of a third-party Bambu API library; not part of
+# the slicer/web pipeline. Has its own .git which git would treat as a
+# submodule otherwise.
+BambuAPI/
+
+# Personal/career notes — not for the repo.
+docs/BambuCLI_meeting_prep.md
+docs/email_intake_scope.md
+
+# Ad-hoc debug dumps (printer logs, comparison 3MFs). Encrypted printer logs
+# from Bambu can be hundreds of MB — never commit these.
+debug_*/

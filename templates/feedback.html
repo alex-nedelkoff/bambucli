@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Feedback{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="history-header">
+    <h2>Feedback</h2>
+    <div class="history-actions">
+      <span class="dim">Pilot-phase suggestions, bugs, and notes. Pick your
+      name in the top-right so Alex knows who flagged what.</span>
+    </div>
+  </div>
+
+  <form id="feedback-form" class="feedback-form">
+    <div class="field" style="margin-bottom: 8px;">
+      <label for="fb-body">What's on your mind?</label>
+      <textarea id="fb-body" name="body" rows="4" required
+        placeholder="e.g. The receipt printer cut paper mid-line on a 4-plate order. Receipt #42 attached, 2pm-ish."></textarea>
+    </div>
+    <div class="feedback-form-row">
+      <span class="dim">
+        Signing as
+        <strong id="fb-author-label" class="feedback-author-label">(no name picked)</strong>
+      </span>
+      <button type="submit" class="button">Post feedback</button>
+    </div>
+  </form>
+
+  {% set open_entries = entries | selectattr('resolved', 'equalto', false) | list %}
+  {% set resolved_entries = entries | selectattr('resolved', 'equalto', true) | list %}
+
+  <h3 class="feedback-section-header">
+    Open <span class="dim">({{ open_entries|length }})</span>
+  </h3>
+  {% if open_entries %}
+    <ul class="feedback-list">
+      {% for e in open_entries %}
+        {% include "_feedback_entry.html" %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="dim feedback-empty">Nothing open. Add something above.</p>
+  {% endif %}
+
+  <h3 class="feedback-section-header" style="margin-top: 22px;">
+    Resolved <span class="dim">({{ resolved_entries|length }})</span>
+  </h3>
+  {% if resolved_entries %}
+    <ul class="feedback-list feedback-list-resolved">
+      {% for e in resolved_entries %}
+        {% include "_feedback_entry.html" %}
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="dim feedback-empty">No resolved items yet.</p>
+  {% endif %}
+</div>
+
+<script>
+(function() {
+  // Show the staff picker's current name next to the post button.
+  const refreshAuthorLabel = () => {
+    const label = document.getElementById('fb-author-label');
+    if (!label) return;
+    const who = (window.activeStaff && window.activeStaff()) || '';
+    if (who) {
+      label.textContent = who;
+      label.classList.remove('feedback-author-empty');
+    } else {
+      label.textContent = '(no name picked)';
+      label.classList.add('feedback-author-empty');
+    }
+  };
+  refreshAuthorLabel();
+  // Re-check when the user changes the picker mid-page.
+  document.getElementById('staff-select')?.addEventListener('change', refreshAuthorLabel);
+
+  // Post new entry. Author is captured at submit time from window.activeStaff()
+  // so the value in the dropdown when you hit "Post" is what gets recorded.
+  document.getElementById('feedback-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const body = document.getElementById('fb-body').value.trim();
+    if (!body) return;
+    const author = (window.activeStaff && window.activeStaff()) || '';
+    const fd = new FormData();
+    fd.append('body', body);
+    fd.append('author', author);
+    try {
+      const res = await fetch('/feedback', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const err = await res.text();
+        alert('Could not post: ' + err);
+        return;
+      }
+      location.reload();
+    } catch (e) {
+      alert('Network error posting feedback: ' + e);
+    }
+  });
+
+  // Mark resolved / reopen. Records the active staff name as resolved_by.
+  document.querySelectorAll('.feedback-resolve-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.entryId;
+      const newState = btn.dataset.targetResolved;  // "1" or "0"
+      const fd = new FormData();
+      fd.append('resolved', newState);
+      fd.append('resolved_by', (window.activeStaff && window.activeStaff()) || '');
+      try {
+        const res = await fetch(`/feedback/${id}/resolve`, { method: 'POST', body: fd });
+        if (!res.ok) { alert('Could not update.'); return; }
+        location.reload();
+      } catch (e) { alert('Network error: ' + e); }
+    });
+  });
+
+  // Delete. No undo, so confirm first.
+  document.querySelectorAll('.feedback-delete-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.entryId;
+      if (!confirm('Delete this entry? Cannot be undone.')) return;
+      try {
+        const res = await fetch(`/feedback/${id}/delete`, { method: 'POST' });
+        if (!res.ok) { alert('Could not delete.'); return; }
+        location.reload();
+      } catch (e) { alert('Network error: ' + e); }
+    });
+  });
+})();
+</script>
+{% endblock %}
