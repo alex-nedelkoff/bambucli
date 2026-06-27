@@ -398,22 +398,15 @@ def _save_filaments(items: list[dict]) -> None:
 
 
 def filament_inventory_list() -> list[dict]:
-    """Display list for the Filaments tab + dashboard: stored items, plus any
-    canonical COLOR_NAME_HEX colour not yet stored (so colours added to code
-    later still appear). Each carries default_hex for the 'reset to default'
-    control."""
-    stored = _load_filaments()
-    seen = {it["name"].lower() for it in stored}
+    """Display list for the Filaments tab + dashboard. The stored list (seeded
+    from COLOR_NAME_HEX on first use) is the full source of truth, so delete and
+    rename stick — built-ins don't re-merge. `default_hex` / `is_default` let the
+    UI offer 'reset to default' for colours whose name matches a built-in."""
     out = []
-    for it in stored:
+    for it in _load_filaments():
         default = COLOR_NAME_HEX.get(it["name"].lower())
         out.append({**it, "default_hex": (default or it["hex"]).upper(),
                     "is_default": default is not None})
-    for name, hx in COLOR_NAME_HEX.items():
-        if name in _FILAMENT_SEED_SKIP or _title(name).lower() in seen:
-            continue
-        out.append({"name": _title(name), "hex": hx.upper(), "on_hand": False,
-                    "low": False, "default_hex": hx.upper(), "is_default": True})
     return out
 
 

@@ -1547,8 +1547,10 @@ async def api_filaments_upsert(
     color_hex: str = Form(...),
     on_hand: str = Form(""),
     low: str = Form(""),
+    old_name: str = Form(""),
 ) -> dict:
-    """Add or update one colour (keyed case-insensitively by name)."""
+    """Add or update one colour (keyed case-insensitively by name). Pass
+    `old_name` to rename: the old entry is dropped and replaced by `name`."""
     from slice_order import _load_filaments, _save_filaments
     name = name.strip()[:40]
     if not name:
@@ -1563,7 +1565,10 @@ async def api_filaments_upsert(
         "on_hand": on_hand.strip().lower() in truthy,
         "low": low.strip().lower() in truthy,
     }
-    items = [it for it in _load_filaments() if it["name"].lower() != name.lower()]
+    drop = {name.lower()}
+    if old_name.strip():
+        drop.add(old_name.strip().lower())
+    items = [it for it in _load_filaments() if it["name"].lower() not in drop]
     items.append(item)
     items.sort(key=lambda it: it["name"].lower())
     _save_filaments(items)
