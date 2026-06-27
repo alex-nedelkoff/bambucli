@@ -385,12 +385,16 @@ def _title(name: str) -> str:
 
 
 def _seed_filaments() -> list[dict]:
-    """Initial inventory: every canonical COLOR_NAME_HEX colour, not on hand."""
-    return [
+    """Initial inventory: every canonical COLOR_NAME_HEX colour plus the named
+    gradient swatches (Rainbow, Candy), not on hand."""
+    items = [
         {"name": _title(name), "hex": hx.upper(), "on_hand": False, "low": False}
         for name, hx in COLOR_NAME_HEX.items()
         if name not in _FILAMENT_SEED_SKIP
     ]
+    for name, hx in (("Rainbow", "#FF0000"), ("Candy", "#FFB3D9")):
+        items.append({"name": name, "hex": hx, "on_hand": False, "low": False})
+    return items
 
 
 def _normalize_filament(raw: dict) -> "dict | None":
@@ -473,13 +477,19 @@ def filament_inventory_list() -> list[dict]:
     for it in _load_filaments():
         default = COLOR_NAME_HEX.get(it["name"].lower())
         comps = _colour_components(it["name"])
+        grad = _gradient_css(it["name"])
+        if grad is not None:
+            swatch_css = grad                       # rainbow / candy sweep
+        elif len(comps) > 1:
+            swatch_css = _swatch_css(comps)         # multi-colour blend
+        else:
+            swatch_css = it["hex"]                  # solid (honours override)
         out.append({**it,
                     "default_hex": (default or it["hex"]).upper(),
                     "is_default": default is not None,
-                    "multi": len(comps) > 1,
-                    # Solid for one colour (honours the override hex); a gradient
-                    # of bands for a multi-colour filament.
-                    "swatch_css": _swatch_css(comps) if len(comps) > 1 else it["hex"]})
+                    # 'derived swatch' -> the card hides the single-colour picker.
+                    "multi": grad is not None or len(comps) > 1,
+                    "swatch_css": swatch_css})
     return out
 
 
@@ -551,20 +561,49 @@ def _fit_font(draw, text: str, max_w: int, start_px: int, min_px: int = 10):
     return _load_font(max(min_px, int(start_px * max_w / width)))
 
 
-# Multi-colour filament names that can't be one hex — rendered as a hue sweep.
-_GRADIENT_NAMES = ("rainbow", "gradient")
+# Named gradient swatches no single hex can represent. Each maps to the HSV
+# (saturation, value) of its hue sweep — full-saturation rainbow vs a pastel
+# "candy" sweep — used for both the PIL thumbnail and the web CSS gradient.
+_GRADIENTS = {
+    "rainbow": (0.85, 1.0),
+    "gradient": (0.85, 1.0),
+    "candy": (0.42, 1.0),  # pastel rainbow
+}
 
 
-def _draw_hue_gradient(img, x0: int, y0: int, x1: int, y1: int) -> None:
-    """Paint a horizontal rainbow (left-to-right hue sweep) into the rectangle.
-    Used as the swatch for multi-colour filaments like 'rainbow', which no
-    single hex can represent."""
+def _gradient_kind(name: str) -> "str | None":
+    """Return the gradient key (rainbow/candy/…) if `name` names one, else None."""
+    n = (name or "").lower()
+    for key in _GRADIENTS:
+        if key in n:
+            return key
+    return None
+
+
+def _gradient_css(name: str) -> "str | None":
+    """CSS rainbow/candy gradient for a named gradient colour, else None."""
+    kind = _gradient_kind(name)
+    if not kind:
+        return None
+    import colorsys
+    sat, val = _GRADIENTS[kind]
+    stops = []
+    for i in range(7):
+        r, g, b = colorsys.hsv_to_rgb(i / 6, sat, val)
+        stops.append("#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255)))
+    return "linear-gradient(135deg, " + ", ".join(stops) + ")"
+
+
+def _draw_hue_gradient(img, x0: int, y0: int, x1: int, y1: int,
+                       sat: float = 0.85, val: float = 1.0) -> None:
+    """Paint a left-to-right hue sweep into the rectangle — full-saturation
+    rainbow, or a pastel candy sweep at lower saturation."""
     import colorsys
     from PIL import ImageDraw
     d = ImageDraw.Draw(img)
     span = max(1, x1 - x0)
     for i in range(span):
-        r, g, b = colorsys.hsv_to_rgb(i / span, 0.85, 1.0)
+        r, g, b = colorsys.hsv_to_rgb(i / span, sat, val)
         d.line([(x0 + i, y0), (x0 + i, y1)],
                fill=(int(r * 255), int(g * 255), int(b * 255)))
 
@@ -674,8 +713,9 @@ def _render_label_png(
     # Rainbow / gradient filaments get a hue sweep instead of a solid swatch;
     # text gets a dark outline so it stays legible over the bright spectrum.
     comps = _colour_components(color_name)
-    if any(g in (color_name or "").lower() for g in _GRADIENT_NAMES):
-        _draw_hue_gradient(img, 0, 0, w, swatch_h)
+    grad_kind = _gradient_kind(color_name)
+    if grad_kind:
+        _draw_hue_gradient(img, 0, 0, w, swatch_h, *_GRADIENTS[grad_kind])
         on_swatch, stroke_w, stroke_fill = (255, 255, 255), max(2, int(3 * scale)), (0, 0, 0)
     elif len(comps) > 1:
         # Multi-colour filament ("Red / Blue"): equal colour bands, outlined text.
