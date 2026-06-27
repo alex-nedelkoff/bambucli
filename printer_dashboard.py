@@ -56,6 +56,17 @@ router = APIRouter()
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 
+def _asset_v() -> int:
+    """style.css mtime, for cache-busting the stylesheet link (see base.html)."""
+    try:
+        return int((BASE_DIR / "static" / "style.css").stat().st_mtime)
+    except OSError:
+        return 0
+
+
+templates.env.globals["asset_v"] = _asset_v
+
+
 def _load_printers() -> list[dict]:
     if not PRINTERS_JSON.exists():
         return []

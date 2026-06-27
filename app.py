@@ -87,6 +87,19 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Makerspace Print Intake", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+
+def _asset_v() -> int:
+    """Cache-busting version (style.css mtime) stamped onto the stylesheet link
+    so browsers fetch fresh CSS after a change instead of a stale cached copy.
+    Computed per render so even a no-restart CSS edit busts the cache."""
+    try:
+        return int((BASE_DIR / "static" / "style.css").stat().st_mtime)
+    except OSError:
+        return 0
+
+
+templates.env.globals["asset_v"] = _asset_v
 app.include_router(printer_router)
 
 
