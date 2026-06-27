@@ -321,14 +321,27 @@ def _colour_components(name: str) -> list[str]:
     return [_name_to_hex(p) for p in parts[:3]]
 
 
+# Fraction of each colour's slice that is a soft transition (vs solid). Lower =
+# more distinct colours with a tighter seam; 1.0 = a fully smooth blend.
+_BLEND_FRAC = 0.5
+
+
 def _swatch_css(hexes: list[str]) -> str:
-    """CSS background for a swatch: a solid colour for one, or a soft diagonal
-    blend between the colours for a multi-colour filament."""
+    """CSS background for a swatch: a solid colour for one, or a gentle diagonal
+    blend (solid bands joined by a soft seam) for a multi-colour filament."""
     if not hexes:
         return "#606060"
     if len(hexes) == 1:
         return hexes[0]
-    return "linear-gradient(135deg, " + ", ".join(hexes) + ")"
+    n = len(hexes)
+    seg = 100.0 / n
+    edge = _BLEND_FRAC * seg / 2.0
+    stops = []
+    for i, hx in enumerate(hexes):
+        a = i * seg + (edge if i > 0 else 0.0)
+        b = (i + 1) * seg - (edge if i < n - 1 else 0.0)
+        stops.append(f"{hx} {a:.1f}% {b:.1f}%")
+    return "linear-gradient(135deg, " + ", ".join(stops) + ")"
 
 
 def _hex_to_name(hex_str: str) -> str:
@@ -553,30 +566,38 @@ def _draw_silk_sheen(img, x0: int, y0: int, x1: int, y1: int) -> None:
     img.paste(ov, (x0, y0), ov)
 
 
-def _interp_colour(rgbs, t: float):
-    """Linear-interpolate a colour at position t in [0,1] across the stops."""
+def _blend_at(rgbs, t: float):
+    """Colour at position t in [0,1] across the stops: solid within each colour's
+    band, blending only across the _BLEND_FRAC seam between neighbours. Matches
+    the web swatch gradient."""
     n = len(rgbs)
     if n == 1:
         return rgbs[0]
     t = max(0.0, min(1.0, t))
-    pos = t * (n - 1)
-    i = min(int(pos), n - 2)
-    f = pos - i
-    a, b = rgbs[i], rgbs[i + 1]
-    return tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+    seg = 1.0 / n
+    edge = _BLEND_FRAC * seg / 2.0
+    for i in range(n - 1):
+        boundary = (i + 1) * seg
+        if t < boundary - edge:
+            return rgbs[i]
+        if t <= boundary + edge:
+            f = (t - (boundary - edge)) / (2 * edge) if edge > 0 else 1.0
+            a, b = rgbs[i], rgbs[i + 1]
+            return tuple(int(a[k] + (b[k] - a[k]) * f) for k in range(3))
+    return rgbs[n - 1]
 
 
 def _draw_multicolor(img, x0: int, y0: int, x1: int, y1: int, hexes: list[str]) -> None:
-    """Fill a swatch with a soft diagonal (135deg) blend between 2-3 colours,
-    matching the web swatch gradient. Drawn as constant-sum anti-diagonal lines
-    coloured by their position along the diagonal."""
+    """Fill a swatch with a gentle diagonal (135deg) multi-colour blend, matching
+    the web swatch. Drawn as constant-sum anti-diagonal lines coloured by their
+    position along the diagonal."""
     from PIL import ImageDraw
     d = ImageDraw.Draw(img)
     rgbs = [_hex_to_rgb(h) for h in hexes]
     w, h = int(x1 - x0), int(y1 - y0)
     total = max(1, w + h)
     for s in range(total + 1):
-        col = _interp_colour(rgbs, s / total)
+        col = _blend_at(rgbs, s / total)
         xa = min(w, s); ya = s - xa
         xb = max(0, s - h); yb = s - xb
         d.line([(x0 + xa, y0 + ya), (x0 + xb, y0 + yb)], fill=col, width=2)
