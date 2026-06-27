@@ -345,6 +345,18 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
+def _fit_font(draw, text: str, max_w: int, start_px: int, min_px: int = 10):
+    """Return a font sized so `text` fits within `max_w` px, shrinking down from
+    `start_px`. Text width scales ~linearly with point size, so one remeasure is
+    enough. Keeps long values (e.g. "GLOW IN THE DARK", long patron names) from
+    overflowing the swatch."""
+    font = _load_font(start_px)
+    width = draw.textlength(text, font=font)
+    if width <= max_w or width <= 0:
+        return font
+    return _load_font(max(min_px, int(start_px * max_w / width)))
+
+
 def _render_label_png(
     size: tuple[int, int],
     customer_first: str,
@@ -389,18 +401,21 @@ def _render_label_png(
     if w >= 256:
         draw.text((w / 2, swatch_h * 0.32), "LOAD", fill=on_swatch,
                   font=font_small, anchor="mm")
+    name_font = _fit_font(draw, label_text, int(w * 0.90), max(12, int(64 * scale)))
     draw.text((w / 2, swatch_h * 0.62), label_text, fill=on_swatch,
-              font=font_color, anchor="mm")
+              font=name_font, anchor="mm")
 
     if w < 256:
         # Compact label (small thumbnail): just patron name under the swatch.
+        cust_font = _fit_font(draw, customer_first, int(w * 0.90), max(10, int(56 * scale)))
         draw.text((w / 2, swatch_h + (h - swatch_h) / 2), customer_first,
-                  fill=(30, 40, 60), font=font_name, anchor="mm")
+                  fill=(30, 40, 60), font=cust_font, anchor="mm")
     else:
         # Full label: patron, plate, time+mass, date.
         y = swatch_h + int(h * 0.08)
+        cust_font = _fit_font(draw, customer_first, int(w * 0.90), max(10, int(56 * scale)))
         draw.text((w / 2, y), customer_first, fill=(30, 40, 60),
-                  font=font_name, anchor="mm")
+                  font=cust_font, anchor="mm")
 
         plate_line = (
             f"Plate {plate_idx} of {plate_total}" if plate_total > 1 else "Single plate"
