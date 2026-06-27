@@ -2,19 +2,26 @@
 # with a real Windows Service running as SYSTEM, so the daemon survives
 # logouts and reboots.
 #
-# Models stay under C:\Users\Administrator\.ollama\models (set via
-# OLLAMA_MODELS env var) so anything you pulled as your user is reused.
+# Models stay under C:\Users\alex\.ollama\models (set via OLLAMA_MODELS
+# env var) so anything you pulled as your user is reused. SYSTEM has read
+# access to that profile path.
 
 Start-Transcript -Path "$PSScriptRoot\register-ollama.log" -Force
 $ErrorActionPreference = "Stop"
 
-$ollamaExe   = "C:\Users\Administrator\AppData\Local\Programs\Ollama\ollama.exe"
-$modelsDir   = "C:\Users\Administrator\.ollama\models"
+$ollamaExe   = "C:\Users\alex\AppData\Local\Programs\Ollama\ollama.exe"
+$modelsDir   = "C:\Users\alex\.ollama\models"
 $logDir      = "C:\ProgramData\Ollama"
 $serviceName = "Ollama"
 
+# nssm from winget isn't on PATH until a fresh shell, so fall back to the
+# known WinGet package location if Get-Command can't find it.
 $nssmExe = (Get-Command nssm -ErrorAction SilentlyContinue).Source
-if (-not $nssmExe) { throw "nssm not on PATH. Open a new shell after winget install or specify full path." }
+if (-not $nssmExe) {
+    $nssmExe = Get-ChildItem "C:\Users\alex\AppData\Local\Microsoft\WinGet\Packages\NSSM.NSSM_*\*\win64\nssm.exe" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $nssmExe) { throw "nssm not found on PATH or in WinGet packages. Run 'winget install NSSM.NSSM' first." }
 if (-not (Test-Path $ollamaExe)) { throw "ollama.exe not found at $ollamaExe" }
 if (-not (Test-Path $modelsDir)) { throw "Models dir not found at $modelsDir; pull a model first via 'ollama pull <name>'." }
 
@@ -26,6 +33,15 @@ Write-Host "Removing user Startup shortcut so the per-user copy doesn't relaunch
 $startup = [Environment]::GetFolderPath('Startup')
 $lnk = Join-Path $startup "Ollama.lnk"
 if (Test-Path $lnk) { Remove-Item $lnk -Force; Write-Host "  removed $lnk" }
+
+Write-Host "Removing per-user HKCU Run autostart (tray app) so it can't bind 11434..."
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+foreach ($name in @("Ollama","OllamaApp")) {
+    if (Get-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -Path $runKey -Name $name -Force
+        Write-Host "  removed Run\$name"
+    }
+}
 
 Write-Host "Ensuring log dir exists..."
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
