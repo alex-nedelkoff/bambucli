@@ -815,3 +815,70 @@ table.uploads .inspecting-cell {
   font-style: italic;
   font-size: 13px;
 }
+
+/* ---------- Filaments tab ---------- */
+.filaments-table td { vertical-align: middle; }
+.fil-swatch {
+  display: inline-block;
+  width: 26px; height: 26px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.fil-hex-cell { white-space: nowrap; }
+.fil-hex-cell .fil-color,
+.fil-hex-cell #add-color {
+  width: 30px; height: 26px; padding: 0;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: none; cursor: pointer; vertical-align: middle;
+}
+.fil-hex, #add-hex {
+  width: 6em; font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; text-transform: uppercase;
+  padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
+  vertical-align: middle; margin: 0 4px;
+}
+#add-name {
+  width: 11em; padding: 4px 6px;
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.fil-reset { padding: 2px 7px; }
+.fil-add-row td { border-top: 2px solid var(--border); padding-top: 10px; }
+.fil-status { margin-left: 6px; font-size: 12px; }
+
+/* ---------- Dashboard in-stock panel ---------- */
+.stock-panel {
+  margin: 14px 0 4px;
+  padding: 12px 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.stock-head {
+  font-size: 13px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+  margin-bottom: 10px;
+}
+.stock-count {
+  display: inline-block; margin-left: 6px; padding: 0 7px;
+  background: var(--bg); border-radius: 10px;
+  font-size: 12px; color: var(--text);
+}
+.stock-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.stock-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 10px 5px 6px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 16px; font-size: 13px;
+}
+.stock-chip.low { border-color: var(--orange); }
+.stock-sw {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0;
+}
+.stock-name { color: var(--text); }
+.stock-low {
+  font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  color: #fff; background: var(--orange);
+  padding: 1px 5px; border-radius: 8px;
+}

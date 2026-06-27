@@ -11,6 +11,10 @@ printers.json
 # in a hidden marker file; this just maps them to operational labels.
 sd_cards.json
 
+# Staff-curated filament colour inventory (on-hand flags + custom swatch hexes).
+# Per-instance data, not source.
+filaments.json
+
 # Live camera snapshots (overwritten on the printer_dashboard snapshot loop).
 snapshots/
 

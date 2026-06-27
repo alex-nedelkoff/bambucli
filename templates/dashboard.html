@@ -181,6 +181,8 @@
 
 <div class="dash-grid" id="dash-grid"></div>
 
+<div id="filament-stock" class="stock-panel" style="display:none;"></div>
+
 <script>
   // Renders one tile per printer. State arrives as snapshots over a WS;
   // we keep a map by id and re-render that tile only. camLabels caches the
@@ -424,5 +426,34 @@
       img.src = `/snapshot/${id}.jpg?v=${camBust}`;
     }
   }, 8000);
+
+  // In-stock filament panel below the printer tiles. Polled from /api/filaments
+  // (staff curate it on the Filaments tab) so the kiosk stays current without a
+  // reload. Inventory changes rarely, so a 30s poll is plenty.
+  const stockEl = document.getElementById('filament-stock');
+  function escText(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function renderStock(items) {
+    const onHand = (items || []).filter(i => i.on_hand);
+    if (!onHand.length) { stockEl.style.display = 'none'; stockEl.innerHTML = ''; return; }
+    onHand.sort((a, b) => (a.low - b.low) || a.name.localeCompare(b.name));
+    stockEl.style.display = '';
+    stockEl.innerHTML =
+      `<div class="stock-head">Filament in stock <span class="stock-count">${onHand.length}</span></div>` +
+      '<div class="stock-chips">' +
+      onHand.map(i => `<span class="stock-chip${i.low ? ' low' : ''}">` +
+        `<span class="stock-sw" style="background:${escText(i.hex)}"></span>` +
+        `<span class="stock-name">${escText(i.name)}</span>` +
+        (i.low ? '<span class="stock-low">LOW</span>' : '') +
+        '</span>').join('') +
+      '</div>';
+  }
+  async function refreshStock() {
+    try {
+      const r = await fetch('/api/filaments');
+      if (r.ok) renderStock((await r.json()).items);
+    } catch (e) { /* keep last render */ }
+  }
+  refreshStock();
+  setInterval(refreshStock, 30000);
 </script>
 {% endblock %}

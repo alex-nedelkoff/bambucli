@@ -1521,6 +1521,65 @@ async def api_sd_cards() -> dict:
     return {"cards": sorted(by_uuid.values(), key=lambda c: c["name"].lower())}
 
 
+@router.get("/filaments", response_class=HTMLResponse)
+async def page_filaments(request: Request) -> HTMLResponse:
+    """Filaments admin page: curate the colour list (name + swatch hex),
+    toggle 'on hand' / 'low', add or remove colours. Drives the thumbnail
+    swatch palette and the dashboard's in-stock panel. Lives at the same nav
+    level as /dashboard, /sd-cards."""
+    from slice_order import filament_inventory_list
+    return templates.TemplateResponse(
+        request, "filaments.html", {"items": filament_inventory_list()})
+
+
+@router.get("/api/filaments")
+async def api_filaments() -> dict:
+    """Full inventory (built-in + custom colours), each with swatch hex,
+    default hex, and on-hand/low flags. Powers the Filaments tab and the
+    dashboard in-stock panel."""
+    from slice_order import filament_inventory_list
+    return {"items": filament_inventory_list()}
+
+
+@router.post("/api/filaments/upsert")
+async def api_filaments_upsert(
+    name: str = Form(...),
+    color_hex: str = Form(...),
+    on_hand: str = Form(""),
+    low: str = Form(""),
+) -> dict:
+    """Add or update one colour (keyed case-insensitively by name)."""
+    from slice_order import _load_filaments, _save_filaments
+    name = name.strip()[:40]
+    if not name:
+        raise HTTPException(400, "name required")
+    color_hex = color_hex.strip()
+    if not re.match(r"^#[0-9A-Fa-f]{6}$", color_hex):
+        raise HTTPException(400, "hex must be #RRGGBB")
+    truthy = {"1", "true", "on", "yes"}
+    item = {
+        "name": name,
+        "hex": color_hex.upper(),
+        "on_hand": on_hand.strip().lower() in truthy,
+        "low": low.strip().lower() in truthy,
+    }
+    items = [it for it in _load_filaments() if it["name"].lower() != name.lower()]
+    items.append(item)
+    items.sort(key=lambda it: it["name"].lower())
+    _save_filaments(items)
+    return {"ok": True, "item": item}
+
+
+@router.post("/api/filaments/delete")
+async def api_filaments_delete(name: str = Form(...)) -> dict:
+    """Remove a colour from the inventory."""
+    from slice_order import _load_filaments, _save_filaments
+    name = name.strip()
+    items = [it for it in _load_filaments() if it["name"].lower() != name.lower()]
+    _save_filaments(items)
+    return {"ok": True, "name": name}
+
+
 @router.get("/api/printers/{printer_id}/sd-files")
 async def api_printer_sd_files(printer_id: str) -> dict:
     """List the .3mf files on the SD card currently in `printer_id`.

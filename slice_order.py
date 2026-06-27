@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import zipfile
 from datetime import datetime
 from email import policy
@@ -277,6 +278,13 @@ def _name_to_hex(name: str) -> str:
     n = (name or "").strip().lower()
     if not n:
         return "#606060"
+    # Staff-set inventory overrides win over the built-in defaults (the
+    # Filaments tab can re-point any colour's swatch). Exact name only;
+    # finish modifiers below still recurse through here, so "silk <custom>"
+    # derives from the overridden base.
+    overrides = _filament_overrides()
+    if n in overrides:
+        return overrides[n]
     # Exact match wins, so hand-tuned entries (e.g. "dark red") beat the
     # generic modifier transform below.
     if n in COLOR_NAME_HEX:
@@ -311,6 +319,123 @@ def _hex_to_name(hex_str: str) -> str:
             best_name = name
     # Pick a more readable casing: "Light blue" → "Light Blue"
     return " ".join(w.capitalize() for w in (best_name or "").split())
+
+
+# ---------- filament inventory (Filaments tab + dashboard) ----------
+# Staff-curated colour list persisted to filaments.json: each colour's swatch
+# hex (default or overridden), an "on hand" flag and a manual "low" flag. The
+# thumbnail swatch path (_name_to_hex) consults the hex overrides; the web app
+# manages the list via routes in printer_dashboard.py. Mirrors the sd_cards.json
+# load/save pattern (atomic temp-file + rename).
+FILAMENTS_JSON = BASE_DIR / "filaments.json"
+_filaments_lock = threading.Lock()
+# Alias keys in COLOR_NAME_HEX that duplicate another entry — skipped when
+# seeding so the inventory isn't cluttered with synonyms.
+_FILAMENT_SEED_SKIP = {"gray", "glow", "gitd"}
+_overrides_cache: "dict[str, str] | None" = None
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _title(name: str) -> str:
+    return " ".join(w.capitalize() for w in name.split())
+
+
+def _seed_filaments() -> list[dict]:
+    """Initial inventory: every canonical COLOR_NAME_HEX colour, not on hand."""
+    return [
+        {"name": _title(name), "hex": hx.upper(), "on_hand": False, "low": False}
+        for name, hx in COLOR_NAME_HEX.items()
+        if name not in _FILAMENT_SEED_SKIP
+    ]
+
+
+def _normalize_filament(raw: dict) -> "dict | None":
+    name = str(raw.get("name", "")).strip()
+    if not name:
+        return None
+    hx = str(raw.get("hex", "")).strip()
+    if not _HEX_RE.match(hx):
+        # Direct default lookup (NOT _name_to_hex — that would recurse via the
+        # override cache while we're mid-load).
+        hx = COLOR_NAME_HEX.get(name.lower(), "#606060")
+    return {"name": name[:40], "hex": hx.upper(),
+            "on_hand": bool(raw.get("on_hand", False)),
+            "low": bool(raw.get("low", False))}
+
+
+def _load_filaments() -> list[dict]:
+    """Curated inventory from filaments.json; seeds + writes the file from
+    COLOR_NAME_HEX on first use."""
+    if not FILAMENTS_JSON.exists():
+        seeded = _seed_filaments()
+        _save_filaments(seeded)
+        return seeded
+    try:
+        data = json.loads(FILAMENTS_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _seed_filaments()
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return _seed_filaments()
+    out = []
+    for raw in items:
+        if isinstance(raw, dict):
+            norm = _normalize_filament(raw)
+            if norm:
+                out.append(norm)
+    return out
+
+
+def _save_filaments(items: list[dict]) -> None:
+    """Atomic write of the inventory; invalidates the override cache."""
+    global _overrides_cache
+    with _filaments_lock:
+        tmp = FILAMENTS_JSON.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"version": 1, "items": items}, indent=2),
+                       encoding="utf-8")
+        tmp.replace(FILAMENTS_JSON)
+        _overrides_cache = None
+
+
+def filament_inventory_list() -> list[dict]:
+    """Display list for the Filaments tab + dashboard: stored items, plus any
+    canonical COLOR_NAME_HEX colour not yet stored (so colours added to code
+    later still appear). Each carries default_hex for the 'reset to default'
+    control."""
+    stored = _load_filaments()
+    seen = {it["name"].lower() for it in stored}
+    out = []
+    for it in stored:
+        default = COLOR_NAME_HEX.get(it["name"].lower())
+        out.append({**it, "default_hex": (default or it["hex"]).upper(),
+                    "is_default": default is not None})
+    for name, hx in COLOR_NAME_HEX.items():
+        if name in _FILAMENT_SEED_SKIP or _title(name).lower() in seen:
+            continue
+        out.append({"name": _title(name), "hex": hx.upper(), "on_hand": False,
+                    "low": False, "default_hex": hx.upper(), "is_default": True})
+    return out
+
+
+def _filament_overrides() -> dict[str, str]:
+    """{name.lower(): hex} swatch overrides, read straight from filaments.json
+    (no seeding — slicing must never write the file). Cached for the process;
+    _save_filaments clears it."""
+    global _overrides_cache
+    if _overrides_cache is None:
+        ov: dict[str, str] = {}
+        if FILAMENTS_JSON.exists():
+            try:
+                data = json.loads(FILAMENTS_JSON.read_text(encoding="utf-8"))
+                for raw in (data.get("items") or []):
+                    name = str(raw.get("name", "")).strip().lower()
+                    hx = str(raw.get("hex", "")).strip()
+                    if name and _HEX_RE.match(hx):
+                        ov[name] = hx.upper()
+            except (OSError, json.JSONDecodeError):
+                pass
+        _overrides_cache = ov
+    return _overrides_cache
 
 
 def _load_font(size: int):
