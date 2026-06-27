@@ -35,42 +35,46 @@ keeps a tidy job log. It runs on a single kiosk PC next to the printers.
 
 ```mermaid
 flowchart TD
-    Staff(["👩‍🔧 Staff browser"])
-    Patron["✉️ Patron email · .eml"]
+    Patron["✉️ Patron<br/>emails an order (.eml + STLs)"]
+    Staff["👩‍🔧 Staff browser<br/>· same network ·"]
 
-    subgraph Kiosk["Kiosk PC · guten-slice · Windows 11"]
-        subgraph FA["FastAPI app · uvicorn port 8000"]
-            Web["app.py<br/>order intake · receipts · ledger"]
-            Dash["printer_dashboard.py<br/>dashboard · MQTT observer · WebSocket"]
-            Email["email_parser.py"]
-            Slice["slice_order.py<br/>subprocess — slice · label · receipt"]
-        end
-        Ollama["🧠 Ollama service<br/>llama3.2:1b · port 11434"]
-        Orca["🧩 OrcaSlicer CLI<br/>+ bundled presets"]
-        Receipt["🧾 USB receipt printer<br/>WinUSB · ESC/POS"]
-        Store[("🗄️ printqueue/<br/>orders.json · jobs.db · feedback.db<br/>filaments.json · sd_cards.json")]
+    subgraph Kiosk["🖥️ Kiosk PC · guten-slice · Windows 11"]
+        App["FastAPI app · :8000<br/>web · dashboard · MQTT observer"]
+        Email["email_parser.py"]
+        Ollama["🧠 Ollama · llama3.2:1b"]
+        Slice["slice_order.py<br/>slice · label · receipt"]
+        Orca["🧩 OrcaSlicer CLI"]
+        Receipt["🧾 Receipt printer · WinUSB"]
+        Store[("🗄️ orders · jobs<br/>filaments · sd-cards")]
     end
 
     Printers["🖨️ 3× Bambu Lab printers<br/>P1S · X1C · X1C"]
 
-    Staff -->|HTTP| Web
-    Staff -.->|live WebSocket| Dash
-    Patron --> Web
-    Web --> Email
-    Email -->|HTTP| Ollama
-    Web --> Slice
+    %% --- email intake path (highlighted) ---
+    Patron ==>|"① email received"| Staff
+    Staff ==>|"② uploads .eml / STL"| App
+    App ==>|"③ parse prose"| Email
+    Email --> Ollama
+
+    %% --- slicing + output ---
+    App --> Slice
     Slice --> Orca
     Slice --> Receipt
-    Web <--> Store
-    Dash <--> Store
-    Web -->|FTPS upload 3MF| Printers
-    Dash <-->|MQTT 8883 · cameras| Printers
+    App --> Store
+
+    %% --- printers ---
+    App -->|"upload 3MF · FTPS"| Printers
+    App <-->|"status · cameras · MQTT"| Printers
+
+    classDef intake fill:#ffe6a7,stroke:#b45309,color:#111,stroke-width:2px;
+    class Patron,Staff intake
 ```
 
 ### Order lifecycle
 
 ```mermaid
 sequenceDiagram
+    actor Patron
     actor Staff
     participant Web as app.py
     participant LLM as Ollama
@@ -78,9 +82,10 @@ sequenceDiagram
     participant SD as Printer storage
     participant Obs as MQTT observer
 
-    Staff->>Web: New order — STL / .eml / 3MF + colour + card
+    Patron->>Staff: emails the order (.eml + STLs) — same network
+    Staff->>Web: upload .eml / STL + colour + card
     opt patron .eml
-        Web->>LLM: parse email body
+        Web->>LLM: parse email body (local)
         LLM-->>Web: customer, card, colour, qty
     end
     Web->>Slicer: slice in a subprocess
